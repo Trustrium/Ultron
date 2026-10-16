@@ -228,3 +228,23 @@ QScrollBar::handle:vertical:hover {
 
 def get_stylesheet() -> str:
     return WINDOW_STYLESHEET
+
+
+# --- Aura v2 (premium purple-gradient theme) -------------------------
+# Re-exported here so existing `from .ultron_theme import ...` call sites
+# keep working; the Aura widgets themselves live in aura_theme.py /
+# aura_orb.py. Appended styles override the HUD defaults for Aura panels.
+try:
+    from .aura_theme import (  # noqa: F401
+        AURA_COLORS,
+        AURA_GRADIENT,
+        AURA_STATE_COLORS,
+        AURA_STYLESHEET,
+    )
+
+    WINDOW_STYLESHEET = WINDOW_STYLESHEET + "\n" + AURA_STYLESHEET
+except Exception:  # pragma: no cover - Aura theme is optional
+    AURA_COLORS = {}
+    AURA_GRADIENT = ()
+    AURA_STATE_COLORS = {}
+    AURA_STYLESHEET = ""

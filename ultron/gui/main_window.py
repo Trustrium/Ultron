@@ -1,25 +1,35 @@
-"""Main Ultron window — Jarvis HUD edition.
+"""Main Ultron window — Aura v2 edition.
 
-Layout:
-  Header: ULTRON + TRUSTRIUM • JARVIS HUD + status + mode + Settings/History
-  Left:   glowing HUD core + spectrum + Talk now + Start/Stop + quick chips
-          + mini system panel (CPU / RAM / Battery)
-  Right:  chat-bubble conversation view
+Desktop adaptation of the mobile AI-app references (Echo Mind / AI
+writer style): hero fluid Aura orb, Chat / Talk mode cards, modern chat
+bubbles + input bar, History sidebar, Topics / Quick-action chips,
+premium dark purple-gradient styling. NOT a literal phone portrait —
+a 1020x680 desktop window.
 
-Public behavior preserved from the original window:
+Public behavior preserved from the Jarvis HUD window:
   MainWindow, worker signals (status_changed, message_logged, error,
   level_changed), _on_status / _on_log / _on_error / _on_level, mode combo
   values wake/voice, Start/Stop, Talk now (request_voice_turn), Settings
   dialog, History viewer, Ctrl+Alt+J hotkey, autostart sync, usage status bar.
+
+Text input: the old GUI had NO text-injection channel into the worker,
+so typed chat runs on a small GUI-owned text runner (same real Brain,
+same Brain.think / speak / conversation-log path the worker uses for
+voice turns). It never fakes a reply. While a voice session is running
+we do NOT start a second Brain — Chat asks you to press Stop first.
 """
 from __future__ import annotations
 
+import datetime as _dt
 import html
+import threading
+import traceback
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QTextEdit, QComboBox, QStatusBar, QFrame, QSizePolicy,
+    QTextEdit, QComboBox, QStatusBar, QFrame, QSizePolicy, QLineEdit,
+    QListWidget, QListWidgetItem,
 )
 from PySide6.QtGui import QFont, QColor
 
@@ -27,19 +37,24 @@ from .worker import UltronWorker
 from .settings_dialog import SettingsDialog
 from .conversation_viewer import ConversationViewer
 from .waveform import LiveWaveform
-from .hud_core import HudCoreWidget
 from ..settings import load as load_settings, save as save_settings
 from ..hotkey import GlobalHotkey
 from .. import autostart
 from .. import usage as usage_mod
 
+# Aura orb is the new default visual; Jarvis core stays as fallback.
+try:
+    from .aura_orb import AuraOrbWidget
+except Exception:  # pragma: no cover - fallback if Aura import fails
+    from .hud_core import HudCoreWidget as AuraOrbWidget
+
 
 STATUS_COLOR = {
-    "idle": "#9AA3B2",
+    "idle": "#8B5CF6",
     "starting": "#cc9933",
     "listening": "#FF6A00",
-    "thinking": "#9933CC",
-    "speaking": "#33AA66",
+    "thinking": "#A855F7",
+    "speaking": "#EC4899",
     "error": "#cc3333",
 }
 
@@ -53,7 +68,7 @@ STATUS_LABEL = {
     "error": "❌  Error",
 }
 
-# Quick command chips: label -> spoken command text.
+# Quick command chips: label -> spoken/typed command text.
 _QUICK_COMMANDS = [
     ("📋  Briefing", "morning briefing"),
     ("🌐  Open Chrome", "open Chrome"),
@@ -61,26 +76,40 @@ _QUICK_COMMANDS = [
     ("🎛️  Command Center", "command center"),
 ]
 
+# Topics: label -> starter prompt.
+_TOPICS = [
+    ("📈  Finance", "Briefing on Finance"),
+    ("💚  Health", "Briefing on Health"),
+    ("💻  Develop", "Briefing on Develop"),
+    ("💼  Business", "Briefing on Business"),
+]
+
 _BUBBLE_STYLE = {
-    "you": ("#1E3A5F", "#FFFFFF", "right"),
-    "ultron": ("#2A1E14", "#FFE2C2", "left"),
-    "system": ("#1A1D24", "#A8A8B0", "center"),
-    "reminder": ("#2A2414", "#FFD84D", "left"),
-    "error": ("#3A1A1A", "#FF8A8A", "left"),
+    "you": ("#4C2E85", "#FFFFFF", "right"),
+    "ultron": ("#2D2350", "#FFE2F0", "left"),
+    "system": ("#221A3B", "#C4B8E8", "center"),
+    "reminder": ("#3A2E14", "#FFD84D", "left"),
+    "error": ("#4A1A1A", "#FF8A8A", "left"),
 }
 
 
 class MainWindow(QMainWindow):
+    # Text-runner signals (GUI-thread safe updates from the text thread).
+    _text_log = Signal(str, str)
+    _text_status = Signal(str)
+    _text_typing = Signal(bool)
+    _text_stages = Signal(str)
+
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Ultron — Jarvis HUD")
+        self.setWindowTitle("Ultron — Aura")
         try:
             from .ultron_theme import WINDOW_STYLESHEET as _ULTRON_SS
             self.setStyleSheet(_ULTRON_SS)
         except Exception:
             pass
-        self.resize(900, 640)
-        self.setMinimumSize(860, 600)
+        self.resize(1020, 680)
+        self.setMinimumSize(940, 620)
 
         s = load_settings()
         self.worker = UltronWorker(self)
@@ -88,6 +117,13 @@ class MainWindow(QMainWindow):
         self.worker.message_logged.connect(self._on_log)
         self.worker.error.connect(self._on_error)
         self.worker.level_changed.connect(self._on_level)
+        # Text-runner signals -> same slots as the voice worker.
+        self._text_log.connect(self._on_log)
+        self._text_status.connect(self._on_status)
+        self._text_typing.connect(self._set_typing_direct)
+        self._text_stages.connect(self._set_stages_direct)
+        self._text_busy = False
+        self._text_cancel = False
 
         central = QWidget()
         root = QVBoxLayout(central)
@@ -97,7 +133,7 @@ class MainWindow(QMainWindow):
 
         # ---- Header ---------------------------------------------------
         header = QFrame()
-        header.setObjectName("hudHeader")
+        header.setObjectName("auraHeader")
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(14, 10, 14, 10)
         header_layout.setSpacing(12)
@@ -105,20 +141,18 @@ class MainWindow(QMainWindow):
         title_col = QVBoxLayout()
         title_col.setSpacing(0)
         title_label = QLabel("ULTRON")
-        title_label.setObjectName("hudTitle")
-        subtitle_label = QLabel("TRUSTRIUM  •  JARVIS HUD")
-        subtitle_label.setObjectName("hudSubtitle")
+        title_label.setObjectName("auraTitle")
+        subtitle_label = QLabel("TRUSTRIUM  •  AURA  •  AGI")
+        subtitle_label.setObjectName("auraSubtitle")
         title_col.addWidget(title_label)
         title_col.addWidget(subtitle_label)
         header_layout.addLayout(title_col)
-
         header_layout.addStretch(1)
 
         # Status pill: dot + text (preserved attribute names).
         self.status_dot = QLabel("●")
-        self.status_dot.setStyleSheet("color: #9AA3B2; font-size: 20px;")
+        self.status_dot.setStyleSheet("color: #8B5CF6; font-size: 20px;")
         self.status_text = QLabel("Idle")
-        self.status_text.setObjectName("hudStatus")
         f = QFont()
         f.setBold(True)
         f.setPointSize(11)
@@ -143,106 +177,167 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(self.history_btn)
         root.addWidget(header)
 
-        # ---- Body: left HUD core + right chat -------------------------
+        # ---- Body: History sidebar + center ---------------------------
         body = QHBoxLayout()
         body.setSpacing(12)
         root.addLayout(body, 1)
 
-        # Left panel: core + spectrum + Talk + Start/Stop + chips + system.
+        # Left sidebar: History + system mini panel.
         left = QFrame()
-        left.setObjectName("corePanel")
-        left.setFixedWidth(330)
+        left.setObjectName("historyPanel")
+        left.setFixedWidth(230)
         left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(14, 14, 14, 14)
-        left_layout.setSpacing(10)
-
-        self.hud_core = HudCoreWidget()
-        # Center the core in the panel.
-        core_row = QHBoxLayout()
-        core_row.addStretch(1)
-        core_row.addWidget(self.hud_core)
-        core_row.addStretch(1)
-        left_layout.addLayout(core_row)
-
-        # Live spectrum visualizer (preserved attribute name: waveform).
-        self.waveform = LiveWaveform()
-        left_layout.addWidget(self.waveform)
-
-        # Talk-now button (only relevant in voice mode).
-        self.talk_btn = QPushButton("🎤  Talk now")
-        self.talk_btn.setObjectName("talkBtn")
-        self.talk_btn.setEnabled(False)
-        self.talk_btn.setMinimumHeight(48)
-        left_layout.addWidget(self.talk_btn)
-
-        # Start / Stop row.
-        self.start_btn = QPushButton("▶  Start")
-        self.start_btn.setObjectName("startBtn")
-        self.stop_btn = QPushButton("⏹  Stop")
-        self.stop_btn.setEnabled(False)
-        start_stop = QHBoxLayout()
-        start_stop.addWidget(self.start_btn, 1)
-        start_stop.addWidget(self.stop_btn, 1)
-        left_layout.addLayout(start_stop)
-
-        # Quick command chips.
-        chips_label = QLabel("QUICK COMMANDS")
-        chips_label.setStyleSheet("color: #7A8191; font-size: 9px; font-weight: 700; letter-spacing: 2px;")
-        left_layout.addWidget(chips_label)
-        self.chip_buttons: list[QPushButton] = []
-        chips_row1 = QHBoxLayout()
-        chips_row2 = QHBoxLayout()
-        for idx, (label, command) in enumerate(_QUICK_COMMANDS):
-            btn = QPushButton(label)
-            btn.setObjectName("chipBtn")
-            btn.clicked.connect(lambda _checked=False, cmd=command: self._quick_command(cmd))
-            self.chip_buttons.append(btn)
-            (chips_row1 if idx < 2 else chips_row2).addWidget(btn, 1)
-        left_layout.addLayout(chips_row1)
-        left_layout.addLayout(chips_row2)
-
-        # Mini system panel: CPU / RAM / Battery (psutil if available).
-        sys_panel = QFrame()
-        sys_panel.setObjectName("sysPanel")
-        sys_layout = QVBoxLayout(sys_panel)
-        sys_layout.setContentsMargins(10, 8, 10, 8)
-        sys_layout.setSpacing(2)
+        left_layout.setContentsMargins(10, 10, 10, 10)
+        left_layout.setSpacing(8)
+        hist_title = QLabel("HISTORY")
+        hist_title.setStyleSheet("color: #8E83B8; font-size: 9px; font-weight: 700; letter-spacing: 2px;")
+        left_layout.addWidget(hist_title)
+        self.history_list = QListWidget()
+        self.history_list.setObjectName("auraHistory")
+        left_layout.addWidget(self.history_list, 1)
+        self.history_refresh_btn = QPushButton("🔄  Refresh history")
+        self.history_refresh_btn.setObjectName("auraChipBtn")
+        left_layout.addWidget(self.history_refresh_btn)
         sys_title = QLabel("SYSTEM")
-        sys_title.setStyleSheet("color: #7A8191; font-size: 9px; font-weight: 700; letter-spacing: 2px;")
-        sys_layout.addWidget(sys_title)
+        sys_title.setStyleSheet("color: #8E83B8; font-size: 9px; font-weight: 700; letter-spacing: 2px;")
+        left_layout.addWidget(sys_title)
         self.cpu_label = QLabel("CPU: —")
-        self.cpu_label.setObjectName("sysValue")
         self.ram_label = QLabel("RAM: —")
-        self.ram_label.setObjectName("sysValue")
         self.batt_label = QLabel("Battery: —")
-        self.batt_label.setObjectName("sysValue")
-        sys_layout.addWidget(self.cpu_label)
-        sys_layout.addWidget(self.ram_label)
-        sys_layout.addWidget(self.batt_label)
-        left_layout.addWidget(sys_panel)
+        for lbl in (self.cpu_label, self.ram_label, self.batt_label):
+            lbl.setStyleSheet("color: #FFFFFF; font-size: 10px; font-weight: 700;")
+            left_layout.addWidget(lbl)
         left_layout.addStretch(1)
         body.addWidget(left)
 
-        # Right panel: chat-bubble conversation view.
-        right = QFrame()
-        right.setObjectName("chatPanel")
-        right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(10, 10, 10, 10)
-        right_layout.setSpacing(6)
-        chat_title = QLabel("CONVERSATION")
-        chat_title.setStyleSheet("color: #7A8191; font-size: 9px; font-weight: 700; letter-spacing: 2px;")
-        right_layout.addWidget(chat_title)
+        # Center panel: orb + mode cards + chat + input.
+        center = QFrame()
+        center.setObjectName("centerPanel")
+        center_layout = QVBoxLayout(center)
+        center_layout.setContentsMargins(14, 14, 14, 12)
+        center_layout.setSpacing(10)
+        body.addWidget(center, 1)
+
+        # Aura orb (hero). Alias hud_core -> same object for compatibility
+        # with the old _on_status / _on_level code paths.
+        self.aura_orb = AuraOrbWidget()
+        self.hud_core = self.aura_orb
+        orb_row = QHBoxLayout()
+        orb_row.addStretch(1)
+        orb_row.addWidget(self.aura_orb)
+        orb_row.addStretch(1)
+        center_layout.addLayout(orb_row)
+
+        # Listening banner (voice screen state).
+        self.listening_banner = QFrame()
+        self.listening_banner.setObjectName("auraPanel")
+        banner_layout = QHBoxLayout(self.listening_banner)
+        banner_layout.setContentsMargins(12, 8, 12, 8)
+        self.listening_label = QLabel("Go ahead, I'm listening…")
+        self.listening_label.setStyleSheet("color: #FFFFFF; font-size: 12px; font-weight: 700;")
+        self.cancel_btn = QPushButton("✕  Cancel")
+        self.cancel_btn.setObjectName("auraChipBtn")
+        banner_layout.addWidget(self.listening_label, 1)
+        banner_layout.addWidget(self.cancel_btn)
+        self.listening_banner.setVisible(False)
+        center_layout.addWidget(self.listening_banner)
+
+        # Live spectrum visualizer (preserved attribute name: waveform).
+        self.waveform = LiveWaveform()
+        center_layout.addWidget(self.waveform)
+
+        # AGI stages line: Thinking -> Acting -> Verifying (never faked).
+        self.agi_label = QLabel("Thinking → Acting → Verifying")
+        self.agi_label.setStyleSheet("color: #8E83B8; font-size: 10px;")
+        self.agi_label.setAlignment(Qt.AlignCenter)
+        center_layout.addWidget(self.agi_label)
+
+        # Mode cards: Chat / Talk (Echo Mind style).
+        cards = QHBoxLayout()
+        cards.setSpacing(10)
+        self.chat_card = QPushButton("💬  Chat with Ultron\nType — keyboard")
+        self.chat_card.setObjectName("auraModeCard")
+        self.chat_card.setMinimumHeight(64)
+        self.talk_card = QPushButton("🎤  Talk with Ultron\nVoice — mic")
+        self.talk_card.setObjectName("auraModeCard")
+        self.talk_card.setMinimumHeight(64)
+        cards.addWidget(self.chat_card, 1)
+        cards.addWidget(self.talk_card, 1)
+        center_layout.addLayout(cards)
+
+        # Chat-bubble conversation view.
         self.log_view = QTextEdit()
         self.log_view.setObjectName("chatView")
         self.log_view.setReadOnly(True)
         self.log_view.setFont(QFont("Segoe UI", 10))
         self.log_view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        right_layout.addWidget(self.log_view, 1)
-        hint = QLabel("Tip: Voice mode → Start → Talk now. Or press Ctrl+Alt+J anywhere.")
-        hint.setStyleSheet("color: #7A8191; font-size: 10px;")
+        center_layout.addWidget(self.log_view, 1)
+
+        # Typing indicator (hidden unless thinking).
+        self.typing_label = QLabel("Ultron is thinking…")
+        self.typing_label.setStyleSheet("color: #C4B8E8; font-size: 11px; font-style: italic;")
+        self.typing_label.setVisible(False)
+        center_layout.addWidget(self.typing_label)
+
+        # Quick actions + Topics chips above the input bar.
+        chips_label = QLabel("QUICK ACTIONS  •  TOPICS")
+        chips_label.setStyleSheet("color: #8E83B8; font-size: 9px; font-weight: 700; letter-spacing: 2px;")
+        center_layout.addWidget(chips_label)
+        chips_row = QHBoxLayout()
+        chips_row.setSpacing(6)
+        self.chip_buttons: list[QPushButton] = []
+        for label, command in _QUICK_COMMANDS:
+            btn = QPushButton(label)
+            btn.setObjectName("auraChipBtn")
+            btn.clicked.connect(lambda _c=False, cmd=command: self._quick_command(cmd))
+            self.chip_buttons.append(btn)
+            chips_row.addWidget(btn)
+        for label, prompt in _TOPICS:
+            btn = QPushButton(label)
+            btn.setObjectName("auraChipBtn")
+            btn.clicked.connect(lambda _c=False, pr=prompt: self._quick_command(pr))
+            self.chip_buttons.append(btn)
+            chips_row.addWidget(btn)
+        chips_row.addStretch(1)
+        center_layout.addLayout(chips_row)
+
+        # Input bar: text + mic + send.
+        input_row = QHBoxLayout()
+        input_row.setSpacing(8)
+        self.input_edit = QLineEdit()
+        self.input_edit.setObjectName("auraInput")
+        self.input_edit.setPlaceholderText("Send a message…")
+        self.input_edit.returnPressed.connect(self._send_text_from_input)
+        self.mic_btn = QPushButton("🎤")
+        self.mic_btn.setObjectName("auraMicBtn")
+        self.mic_btn.setToolTip("Talk — start Voice mode + Talk now (or Ctrl+Alt+J)")
+        self.send_btn = QPushButton("➤  Send")
+        self.send_btn.setObjectName("auraSendBtn")
+        input_row.addWidget(self.input_edit, 1)
+        input_row.addWidget(self.mic_btn)
+        input_row.addWidget(self.send_btn)
+        center_layout.addLayout(input_row)
+
+        # Talk / Start / Stop row (preserved widgets).
+        controls = QHBoxLayout()
+        controls.setSpacing(8)
+        self.talk_btn = QPushButton("🎤  Talk now")
+        self.talk_btn.setObjectName("talkBtn")
+        self.talk_btn.setEnabled(False)
+        self.talk_btn.setMinimumHeight(44)
+        self.start_btn = QPushButton("▶  Start")
+        self.start_btn.setObjectName("startBtn")
+        self.stop_btn = QPushButton("⏹  Stop")
+        self.stop_btn.setEnabled(False)
+        controls.addWidget(self.talk_btn, 1)
+        controls.addWidget(self.start_btn, 1)
+        controls.addWidget(self.stop_btn, 1)
+        center_layout.addLayout(controls)
+
+        hint = QLabel("Tip: Chat → type + Send. Talk → Talk card or Talk now / Ctrl+Alt+J. Wake mode is still broken — use Voice / Chat.")
+        hint.setStyleSheet("color: #8E83B8; font-size: 10px;")
         hint.setWordWrap(True)
-        right_layout.addWidget(hint)
-        body.addWidget(right, 1)
+        center_layout.addWidget(hint)
 
         self.setStatusBar(QStatusBar(self))
         self._refresh_status_bar()
@@ -259,6 +354,12 @@ class MainWindow(QMainWindow):
         self._sys_timer.timeout.connect(self._refresh_system_panel)
         self._sys_timer.start()
         self._refresh_system_panel()
+
+        # History sidebar.
+        self._history_sessions: list[tuple[str, list[tuple[str, str]]]] = []
+        self._load_history()
+        self.history_refresh_btn.clicked.connect(self._load_history)
+        self.history_list.itemClicked.connect(self._show_history_session)
 
         # Global push-to-talk hotkey.
         self._hotkey = GlobalHotkey(s.get("ptt_hotkey", "ctrl+alt+j"), self._on_hotkey)
@@ -277,6 +378,11 @@ class MainWindow(QMainWindow):
         self.settings_btn.clicked.connect(self._open_settings)
         self.history_btn.clicked.connect(self._open_history)
         self.talk_btn.clicked.connect(lambda: self.worker.request_voice_turn())
+        self.chat_card.clicked.connect(self._chat_card_clicked)
+        self.talk_card.clicked.connect(self._talk_card_clicked)
+        self.mic_btn.clicked.connect(self._mic_clicked)
+        self.send_btn.clicked.connect(self._send_text_from_input)
+        self.cancel_btn.clicked.connect(self._cancel_listening)
 
     # --- hotkey handling ---
     def _on_hotkey(self):
@@ -302,7 +408,6 @@ class MainWindow(QMainWindow):
         model = s.get("llm_model") or "(default)"
         usage_str = usage_mod.format_summary_short() or "Today: 0 tokens"
         msg = f"Provider: {provider}  |  Model: {model}  |  {usage_str}"
-        # Append a short system snapshot when psutil is available.
         try:
             import psutil  # type: ignore
 
@@ -344,6 +449,39 @@ class MainWindow(QMainWindow):
             self.ram_label.setText("RAM: —")
             self.batt_label.setText("Battery: —")
 
+    # --- mode cards ------------------------------------------------
+    def _chat_card_clicked(self):
+        """Chat card: focus the text input. Chat needs no worker."""
+        self.input_edit.setFocus()
+        self._append("system", "Chat mode — type below and press Send.")
+
+    def _talk_card_clicked(self):
+        """Talk card: start Voice mode + trigger one voice turn."""
+        for i in range(self.mode_combo.count()):
+            if self.mode_combo.itemData(i) == "voice":
+                self.mode_combo.setCurrentIndex(i)
+                break
+        if not self.worker.is_running():
+            self._start()
+        # Give the voice loop a moment to arm, then trigger.
+        QTimer.singleShot(800, self.worker.request_voice_turn)
+        self.listening_banner.setVisible(True)
+        self.listening_label.setText("Go ahead, I'm listening…")
+
+    def _mic_clicked(self):
+        """Input-bar mic: same as Talk now / Talk card."""
+        if self.worker.is_running():
+            self.worker.request_voice_turn()
+        else:
+            self._talk_card_clicked()
+
+    def _cancel_listening(self):
+        """Cancel button: best-effort. Hides the banner; a recording already
+        in progress finishes on its own — we never fake a transcript."""
+        self._text_cancel = True
+        self.listening_banner.setVisible(False)
+        self._append("system", "Listening cancelled (a recording already in progress will finish on its own).")
+
     # --- actions ---
     def _start(self):
         mode = self.mode_combo.currentData()
@@ -361,6 +499,7 @@ class MainWindow(QMainWindow):
         self.stop_btn.setEnabled(False)
         self.mode_combo.setEnabled(True)
         self.talk_btn.setEnabled(False)
+        self.listening_banner.setVisible(False)
         self._append("system", "Stop requested. (May need to close window to fully exit wake mode.)")
 
     def _open_settings(self):
@@ -371,41 +510,197 @@ class MainWindow(QMainWindow):
                 f"Provider: {s.get('llm_provider','?')}  |  Model: {s.get('llm_model') or '(default)'}"
             )
 
-    def _quick_command(self, command: str):
-        """Quick chip: guide the user to speak this command.
+    # --- chat text path (GUI-owned text runner) --------------------
+    def _send_text_from_input(self):
+        text = self.input_edit.text().strip()
+        if not text:
+            return
+        self.input_edit.clear()
+        self._send_text(text)
 
-        The GUI has no text input and the worker has no text-injection
-        channel, so chips do not fake a turn. They tell the user exactly
-        what to say and, if the worker is already running, trigger a
-        voice turn so the user can say it immediately.
-        """
-        self._append("system", f"Quick command ready — say: “{command}”")
+    def _send_text(self, text: str):
+        """Send typed text as a real brain turn (never faked)."""
+        text = (text or "").strip()
+        if not text:
+            return
+        if self._text_busy:
+            self._append("system", "Ultron is already thinking — please wait.")
+            return
         if self.worker.is_running():
+            self._append(
+                "system",
+                "Voice session is running — press Stop first to use Chat, "
+                "or use Talk now for voice.",
+            )
+            return
+        self._text_busy = True
+        self._text_cancel = False
+        self._append("you", text)
+        self._text_typing.emit(True)
+        self._text_stages.emit("🧠 Thinking…")
+        self._text_status.emit("thinking")
+        t = threading.Thread(target=self._run_text_turn, args=(text,), daemon=True)
+        t.start()
+
+    def _run_text_turn(self, text: str):
+        """Runs in a background thread. UI updates go through signals only."""
+        try:
+            from ultron.config import assert_keys
+            try:
+                assert_keys()
+            except RuntimeError as exc:
+                self._text_log.emit("error", str(exc))
+                self._text_status.emit("error")
+                return
+            from ultron.brain import Brain
+            from ultron.voice.speak import speak
+            from ultron.conversation_log import log as conv_log
+
+            # Language: Roman Urdu detection if available, else English.
+            lang = "en"
+            try:
+                from ..voice.roman_urdu import detect_roman_urdu
+
+                if detect_roman_urdu(text):
+                    lang = "roman_urdu"
+            except Exception:
+                pass
+            conv_log("user", text, lang)
+            self._text_stages.emit("🧠 Thinking → ⚙️ Acting — calling tools…")
+            brain = Brain()
+            reply = brain.think(text, lang=lang)
+            if self._text_cancel:
+                self._text_log.emit("system", "Cancelled.")
+                self._text_status.emit("idle")
+                return
+            self._text_stages.emit("✓ Verifying → 🔊 Speaking…")
+            self._text_log.emit("ultron", reply)
+            conv_log("ultron", reply, lang)
+            self._text_status.emit("speaking")
+            try:
+                speak(reply, lang)
+            except Exception as exc:
+                self._text_log.emit("error", f"TTS failed: {exc}")
+            self._text_status.emit("idle")
+            self._text_stages.emit("Done — Thinking → Acting → Verifying ✓")
+        except Exception:
+            traceback.print_exc()
+            self._text_log.emit("error", f"Sorry, something broke: {traceback.format_exc(limit=1).strip()}")
+            self._text_status.emit("error")
+        finally:
+            self._text_typing.emit(False)
+            self._text_busy = False
+
+    def _quick_command(self, command: str):
+        """Quick / Topic chip.
+
+        If a voice session is running, use the voice path (trigger a voice
+        turn and let the user speak the command). Otherwise send it as a
+        real typed brain turn — no faked replies.
+        """
+        if self.worker.is_running():
+            self._append("system", f"Quick command ready — say: “{command}”")
             self.worker.request_voice_turn()
         else:
-            self._append("system", "Press Start first, then Talk now.")
+            self._send_text(command)
+
+    # --- history sidebar -------------------------------------------
+    def _load_history(self):
+        """Parse data/conversation.log into sessions. Never crashes."""
+        self._history_sessions = []
+        try:
+            from ..config import CONVERSATION_LOG
+
+            path = CONVERSATION_LOG
+            if not path.exists():
+                self.history_list.clear()
+                return
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except Exception:
+            self.history_list.clear()
+            return
+        sessions: list[tuple[str, list[tuple[str, str]]]] = []
+        current: list[tuple[str, str]] = []
+        current_label = ""
+        for line in lines:
+            try:
+                ts = line[:19]
+                rest = line[19:].lstrip()
+                if ":" not in rest:
+                    continue
+                role_part, _, text = rest.partition(":")
+                role = role_part.split("[")[0].strip().lower()
+                text = text.strip()
+                if not text:
+                    continue
+                if role in ("user", "you"):
+                    if current:
+                        sessions.append((current_label, current))
+                    current_label = f"{ts[11:16]} — {text[:60]}"
+                    current = [("you", text)]
+                elif current:
+                    if role == "ultron":
+                        current.append(("ultron", text))
+                    elif role in ("system", "reminder", "error"):
+                        current.append((role, text))
+            except Exception:
+                continue
+        if current:
+            sessions.append((current_label, current))
+        # Keep the newest 50 sessions.
+        self._history_sessions = sessions[-50:]
+        self.history_list.clear()
+        for label, _turns in reversed(self._history_sessions):
+            self.history_list.addItem(QListWidgetItem(label or "(conversation)"))
+
+    def _show_history_session(self, item: QListWidgetItem):
+        """Show one past session in the chat view (non-destructive)."""
+        try:
+            row = self.history_list.row(item)
+            # List is reversed-newest-first; map back to sessions.
+            idx = len(self._history_sessions) - 1 - row
+            if idx < 0 or idx >= len(self._history_sessions):
+                return
+            label, turns = self._history_sessions[idx]
+            self._append("system", f"— History: {label} —")
+            for role, text in turns:
+                self._append(role, text)
+        except Exception:
+            pass
 
     # --- signals from worker ---
     def _on_status(self, s: str):
         self.status_text.setText(STATUS_LABEL.get(s, s.capitalize()))
-        color = STATUS_COLOR.get(s, "#9AA3B2")
+        color = STATUS_COLOR.get(s, "#8B5CF6")
         self.status_dot.setStyleSheet(f"color: {color}; font-size: 20px;")
-        # Drive HUD visuals: core color + spectrum tint + enabled state.
+        # Drive Aura visuals: orb + spectrum tint + enabled state.
         try:
-            self.hud_core.set_state(s)
+            self.aura_orb.set_state(s)
         except Exception:
             pass
         try:
             self.waveform.set_color(color)
         except Exception:
             pass
-        # Light up the spectrum only while actively listening.
         self.waveform.set_enabled_view(s == "listening")
+        # Voice-screen state: full listening banner.
+        try:
+            self.listening_banner.setVisible(s == "listening")
+            if s == "listening":
+                self.listening_label.setText("Go ahead, I'm listening…")
+        except Exception:
+            pass
+        if s == "thinking":
+            self._set_stages_direct("🧠 Thinking…")
+        elif s == "speaking":
+            self._set_stages_direct("✓ Verifying → 🔊 Speaking…")
+        elif s == "idle":
+            pass  # keep the last stages line; next turn overwrites it.
 
     def _on_level(self, level: float):
         self.waveform.set_level(level)
         try:
-            self.hud_core.set_level(level)
+            self.aura_orb.set_level(level)
         except Exception:
             pass
 
@@ -416,10 +711,23 @@ class MainWindow(QMainWindow):
         self._append("error", msg)
         self._on_status("error")
 
+    # --- typing / stages (GUI thread) -------------------------------
+    def _set_typing_direct(self, on: bool):
+        try:
+            self.typing_label.setVisible(bool(on))
+        except Exception:
+            pass
+
+    def _set_stages_direct(self, text: str):
+        try:
+            self.agi_label.setText(text or "Thinking → Acting → Verifying")
+        except Exception:
+            pass
+
     # --- helpers ---
     def _append(self, role: str, text: str):
-        """Append one chat bubble. Role in you/ultron/system/reminder/error."""
-        bg, fg, align = _BUBBLE_STYLE.get(role, ("#1A1D24", "#F2F2F2", "left"))
+        """Append one chat bubble with avatar dot + timestamp."""
+        bg, fg, align = _BUBBLE_STYLE.get(role, ("#221A3B", "#FFFFFF", "left"))
         label = {
             "you": "YOU",
             "ultron": "ULTRON",
@@ -427,34 +735,33 @@ class MainWindow(QMainWindow):
             "reminder": "REMINDER",
             "error": "ERROR",
         }.get(role, role.upper())
+        ts = _dt.datetime.now().strftime("%H:%M")
+        dot = "●"
         safe = html.escape(text or "").replace("\n", "<br>")
+        head = f'<b style="font-size: 9px; letter-spacing: 1px;">{dot} {label} &nbsp;·&nbsp; {ts}</b><br>{safe}'
         if align == "right":
-            # Right-aligned bubble via a right-aligned wrapper.
             block = (
                 f'<div style="text-align: right; margin: 4px 2px;">'
                 f'<span style="display: inline-block; text-align: left; '
                 f'background-color: {bg}; color: {fg}; '
-                f'border-radius: 12px; padding: 8px 12px; max-width: 88%;">'
-                f'<b style="font-size: 9px; letter-spacing: 1px;">{label}</b><br>{safe}'
-                f"</span></div>"
+                f'border-radius: 16px; padding: 8px 12px; max-width: 88%;">'
+                f"{head}</span></div>"
             )
         elif align == "center":
             block = (
                 f'<div style="text-align: center; margin: 4px 2px;">'
                 f'<span style="display: inline-block; background-color: {bg}; color: {fg}; '
-                f'border-radius: 10px; padding: 6px 12px; font-size: 10px;">'
+                f'border-radius: 12px; padding: 6px 12px; font-size: 10px;">'
                 f"{safe}</span></div>"
             )
         else:
             block = (
                 f'<div style="margin: 4px 2px;">'
                 f'<span style="display: inline-block; background-color: {bg}; color: {fg}; '
-                f'border-radius: 12px; padding: 8px 12px; max-width: 88%;">'
-                f'<b style="font-size: 9px; letter-spacing: 1px;">{label}</b><br>{safe}'
-                f"</span></div>"
+                f'border-radius: 16px; padding: 8px 12px; max-width: 88%;">'
+                f"{head}</span></div>"
             )
         self.log_view.append(block)
-        # Keep the newest bubble visible.
         scrollbar = self.log_view.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
