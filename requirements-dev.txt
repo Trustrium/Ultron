@@ -1,0 +1,3 @@
+# Tools only needed if you want to build the desktop .exe yourself.
+# End users don't need this.
+pyinstaller>=6.6.0

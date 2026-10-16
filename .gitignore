@@ -1,0 +1,64 @@
+# Ultron by Trustrium — gitignore
+# Secrets and local data are never committed.
+
+# ===== SECRETS — NEVER COMMIT =====
+.env
+.env.local
+.env.*.local
+data/gmail_credentials.json
+data/gmail_token.json
+data/wa_chrome_profile/
+
+# ===== PERSONAL DATA — local only =====
+data/reminders.json
+data/memory.json
+data/conversation.log
+data/notes.md
+data/usage.json
+data/prenotified.json
+data/app_index.json
+data/routines.json
+data/skills.json
+data/tasks.json
+data/contacts.json
+data/expenses.json
+data/shopping.json
+data/habits.json
+data/health.json
+data/journal.json
+data/profile.json
+data/insights_state.json
+data/watches.json
+ultron_backup*.zip
+
+# ===== PYTHON =====
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.pytest_cache/
+
+# ===== VENV =====
+.venv/
+venv/
+env/
+
+# ===== AUDIO TEMP =====
+*.wav
+*.mp3
+
+# ===== LOGS =====
+install.log
+*.log
+
+# ===== IDE =====
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ===== OS =====
+Thumbs.db
+.DS_Store
