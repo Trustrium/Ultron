@@ -1,11 +1,11 @@
 """Wake-word detection using openWakeWord — fully local, no API key.
 
-Ultron wake phrase is "Hey Ultron". Under the hood the bundled openWakeWord
-model is still named hey_ultron (no custom "hey_ultron" model ships with
-openWakeWord), so saying "Hey Ultron" triggers the detector. The GUI, logs
-and prompts all show "Hey Ultron". Voice / handsfree / text modes do not
-need the wake word at all.
-Loads ONLY the hey_ultron model (not the other 5 bundled wake words).
+Ultron's wake phrase is "Hey Ultron". Honest note: openWakeWord ships NO
+"hey_ultron" acoustic model, so until a custom Hey Ultron model is trained,
+the detector loads the bundled "hey_jarvis" model — it listens for the
+sound of "Hey Jarvis". The GUI, logs and prompts still say "Hey Ultron",
+and text / voice / handsfree modes do not need the wake word at all.
+If a hey_ultron*.onnx file is ever present (custom model), it is preferred.
 """
 from pathlib import Path
 
@@ -20,22 +20,35 @@ DEBUG_PRINT_FLOOR = 0.15       # Print scores above this so you can see "almost"
 
 
 def _find_hey_ultron_onnx() -> str:
-    """Locate the bundled hey_ultron ONNX model file inside the openwakeword package."""
+    """Locate a wake-word ONNX model inside the openwakeword package.
+
+    Prefers a custom hey_ultron model if one is ever bundled; otherwise
+    falls back to the bundled hey_jarvis model that openWakeWord actually
+    ships. Previously this searched for hey_ultron only and raised
+    FileNotFoundError on every real install, so wake mode never started.
+    """
     import openwakeword
     pkg_dir = Path(openwakeword.__file__).parent
-    for candidate in (
-        pkg_dir / "resources" / "models" / "hey_ultron_v0.1.onnx",
-        pkg_dir / "models" / "hey_ultron_v0.1.onnx",
-    ):
-        if candidate.exists():
-            return str(candidate)
-    # Search fallback in case the layout changes.
-    for path in pkg_dir.rglob("hey_ultron*.onnx"):
-        return str(path)
+    for stem in ("hey_ultron", "hey_jarvis"):
+        for candidate in (
+            pkg_dir / "resources" / "models" / f"{stem}_v0.1.onnx",
+            pkg_dir / "models" / f"{stem}_v0.1.onnx",
+        ):
+            if candidate.exists():
+                return str(candidate)
+        # Search fallback in case the layout changes.
+        for path in sorted(pkg_dir.rglob(f"{stem}*.onnx")):
+            return str(path)
     raise FileNotFoundError(
-        "Could not locate hey_ultron_v0.1.onnx inside the openwakeword package. "
-        "Run: python -c \"import openwakeword.utils; openwakeword.utils.download_models()\""
+        "Could not locate a hey_ultron or hey_jarvis .onnx model inside the "
+        "openwakeword package. Run: python -c \"import openwakeword.utils; "
+        "openwakeword.utils.download_models()\""
     )
+
+
+def wake_spoken_phrase(model_path: str) -> str:
+    """The phrase the loaded acoustic model actually listens for."""
+    return "Hey Ultron" if "ultron" in Path(model_path).name.lower() else "Hey Jarvis"
 
 
 class WakeWordListener:
@@ -59,13 +72,17 @@ class WakeWordListener:
 
         model_path = _find_hey_ultron_onnx()
         try:
-            # Load ONLY hey_ultron. Massive speed win vs. loading all 6 defaults.
+            # Load ONLY one wake-word model. Massive speed win vs. loading all defaults.
             self.model = Model(wakeword_models=[model_path], inference_framework="onnx")
         except Exception as e:
             raise RuntimeError(f"Failed to load wake-word model from {model_path}: {e}") from e
 
         self.target_key = next(iter(self.model.models.keys()))
-        print(f"[wake] listening for: 'Hey Ultron' (detector model: '{self.target_key}', 1 model loaded)")
+        self.spoken_phrase = wake_spoken_phrase(model_path)
+        print(f"[wake] listening for: '{self.spoken_phrase}' (detector model: '{self.target_key}', 1 model loaded)")
+        if self.spoken_phrase != "Hey Ultron":
+            print("[wake] note: no custom Hey Ultron acoustic model ships with openWakeWord yet — "
+                  "say 'Hey Jarvis' for wake mode. Text / voice / handsfree modes need no wake word.")
 
     def wait_for_wake(self) -> None:
         """Block until the wake word is detected."""
