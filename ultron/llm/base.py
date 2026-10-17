@@ -42,6 +42,30 @@ class LLMClient(ABC):
     def chat(self, system: str, history: list, tools: list[dict]) -> AssistantResponse:
         """Send one chat round. `tools` is the neutral spec; client converts internally."""
 
+    def chat_stream(self, system: str, history: list, tools: list[dict],
+                    on_token=None) -> AssistantResponse:
+        """Streaming variant of chat(): invokes ``on_token(text_chunk)`` as tokens
+        arrive and returns the same full AssistantResponse as chat().
+
+        Default implementation: single-shot chat() + one on_token call with the
+        full text. Providers with true streaming (OpenAI-compat) override this
+        so the first token arrives in <1s (honest target — network/provider
+        dependent) instead of waiting for the whole reply. Callers MUST treat
+        the return value identically to chat()'s.
+        """
+        resp = self.chat(system, history, tools)
+        if on_token is not None and resp.text:
+            try:
+                on_token(resp.text)
+            except Exception:
+                pass
+        return resp
+
+    def clone_with_model(self, model: str) -> "LLMClient":
+        """Return a client of the same provider/key pointed at another model
+        (used for the opt-in fast-path model). Default: same client."""
+        return self
+
     # --- message construction ---------------------------------------------------
     @abstractmethod
     def make_user_message(self, text: str) -> dict:

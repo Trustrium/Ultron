@@ -14,6 +14,7 @@ from .personality import get_guidance as _personality_guidance
 from . import settings as _settings
 from .tool_registry import TOOLS, TOOL_HANDLERS, _load_plugins_once
 from .tool_router import select_tools
+from .voice.language import language_directive
 
 # Some models (notably Groq's Llama) intermittently emit a malformed tool call
 # as plain text inside the reply, e.g. <function=set_profile>{...}</function>.
@@ -69,23 +70,94 @@ Other things you remember:
 
 MAX_HISTORY_MESSAGES = 40
 
+# Tools that must NEVER go through the speculative fast-path model, even when
+# the request looks like a single direct command. Safety: destructive /
+# outbound actions always get the full main-model reasoning + confirmation flow.
+FAST_PATH_BLOCKED_TOOLS = {
+    "shutdown_pc", "sleep_pc", "delete_file", "delete_reminder", "kill_process",
+    "winget_uninstall", "winget_install", "send_email", "send_whatsapp",
+    "send_sms", "make_call", "delete_task", "delete_skill", "delete_routine",
+    "delete_watch", "delete_habit", "clear_shopping", "forget",
+}
+
+# Markers that mean "this is NOT one simple action" — fast path stays off.
+_FAST_PATH_MULTI_MARKERS = (
+    " and ", " aur ", " phir ", " then ", " uske baad ", " after ", " pehle ",
+    " also ", " plus ", ",", ";", " and then ", " uske baad ",
+)
+_FAST_PATH_QUESTION_MARKERS = (
+    "?", " kya ", " kab ", " kaise ", " kahan ", " kitna ", " kaun ",
+    " why ", " what ", " how ", " when ", " where ", " which ",
+)
+
+
+def fast_path_eligible(user_text: str) -> bool:
+    """True only when the turn is reliably ONE simple, non-destructive,
+    non-question direct command (e.g. 'camera kholo', 'open camera').
+
+    Detection is conservative on purpose: the synonym map must yield exactly
+    ONE candidate tool, the text must be short, and there must be no
+    conjunction / multi-step / question markers. Anything else -> main model.
+    Also requires the opt-in LLM_FAST_PATH=1 env flag (default off).
+    """
+    from . import config as _config
+    if not getattr(_config, "LLM_FAST_PATH", False):
+        return False
+    text = (user_text or "").strip()
+    if not text or len(text.split()) > 10:
+        return False
+    low = f" {text.lower()} "
+    if any(m in low for m in _FAST_PATH_MULTI_MARKERS):
+        return False
+    if any(m in low for m in _FAST_PATH_QUESTION_MARKERS):
+        return False
+    if text.strip().endswith("?"):
+        return False
+    from .tool_synonyms import match_synonyms
+    matches = match_synonyms(text)
+    if len(matches) != 1:
+        return False
+    if matches[0]["tool"] in FAST_PATH_BLOCKED_TOOLS:
+        return False
+    return True
+
 
 class Brain:
     def __init__(self, client: LLMClient | None = None) -> None:
         self.client: LLMClient = client or make_llm_client()
         self.history: list = []
+        self._fast_client: LLMClient | None = None
+        self._fast_client_tried = False
         _load_plugins_once()
 
-    def _system(self) -> str:
+    def _get_fast_client(self) -> LLMClient | None:
+        """Lazily build the opt-in fast-model client (same provider/key)."""
+        if self._fast_client_tried:
+            return self._fast_client
+        self._fast_client_tried = True
+        try:
+            from .llm.factory import make_fast_llm_client
+            self._fast_client = make_fast_llm_client()
+        except Exception as e:
+            print(f"[brain] fast client unavailable ({e})")
+            self._fast_client = None
+        return self._fast_client
+
+    def _system(self, lang: str = "en") -> str:
         mem = t_memory.memory_summary_for_prompt() or "(nothing yet)"
         prof = t_profile.profile_for_prompt() or "(unknown — ask and use set_profile)"
         personality_id = _settings.get("personality", "ultron")
-        return SYSTEM_PROMPT.format(
+        base = SYSTEM_PROMPT.format(
             now=_dt.datetime.now().strftime("%A %d %B %Y, %I:%M %p"),
             memory=mem,
             profile=prof,
             personality=_personality_guidance(personality_id),
         )
+        # Per-turn language directive: reply in the SAME language/script the
+        # user just used. This is appended every turn (not baked into the
+        # static prompt) because the language changes per turn. Never English
+        # unless the user spoke English.
+        return base + f"\n\nLANGUAGE — follow strictly: {language_directive(lang)}"
 
     def _exec_tool(self, name: str, args: dict, lang: str) -> str:
         fn = TOOL_HANDLERS.get(name)
@@ -154,14 +226,35 @@ class Brain:
                 results[idx] = pair
         return results
 
-    def think(self, user_text: str, lang: str = "en") -> str:
+    def think(self, user_text: str, lang: str = "en", on_token=None, on_status=None) -> str:
         """Run one user turn. Handles multi-step tool calling. Returns final spoken reply.
 
         Efficiency: the FIRST model call is given only the tools relevant to the
         user's message (dynamic routing) — big token savings. Follow-up calls in
         the same turn use the full set so multi-step plans aren't constrained.
+
+        Streaming: pass ``on_token`` to receive partial tokens as they arrive
+        (first token <1s is the honest target on a healthy connection — not a
+        guarantee). The return value is IDENTICAL with or without a callback.
+
+        Status: pass ``on_status`` to receive "understanding" / "doing" /
+        "replying" callbacks so the UI can show feedback within milliseconds
+        instead of sitting silent during the LLM call.
+
+        Fast path (opt-in LLM_FAST_PATH=1): for a reliably-detected single-tool
+        direct command, the FIRST call speculatively uses the small fast model.
+        If it does not produce exactly one tool call, that attempt is discarded
+        and the main model retries step 0. All later steps always use the main
+        model. Complex reasoning never leaves the main model.
         """
         from .tool_router import select_tools, cap_tools
+
+        def _status(s: str) -> None:
+            if on_status is not None:
+                try:
+                    on_status(s)
+                except Exception:
+                    pass
 
         self.history.append(self.client.make_user_message(user_text))
         routed = select_tools(user_text, TOOLS,
@@ -170,15 +263,54 @@ class Brain:
         # provider tool limit (Groq rejects > 128), keeping routed tools.
         followup_tools = cap_tools(TOOLS, prefer=[t["name"] for t in routed])
         try:
+            _status("understanding")
+            fast_used = False
             for step in range(6):
                 tools_for_call = routed if step == 0 else followup_tools
-                response = self.client.chat(self._system(), self.history, tools_for_call)
+                # Step 0 fast-path attempt (speculative, main model is the safety net).
+                if step == 0 and not fast_used and fast_path_eligible(user_text):
+                    fast_client = self._get_fast_client()
+                    if fast_client is not None:
+                        fast_used = True
+                        fast_resp = fast_client.chat_stream(
+                            self._system(lang), self.history, tools_for_call,
+                            on_token=on_token)
+                        if len(fast_resp.tool_calls) == 1:
+                            response = fast_resp
+                        else:
+                            # Fast model missed: discard the attempt entirely
+                            # (nothing appended to history yet) and retry with
+                            # the main model below. No correctness is lost.
+                            print("[brain] fast-path miss — retrying with main model")
+                            response = None
+                        if response is not None:
+                            self.history.append(self.client.make_assistant_message(response))
+                            if not response.tool_calls:
+                                self._trim_history()
+                                return _strip_tool_markup(response.text) or "Done."
+                            _status("doing")
+                            results = self._exec_calls(response.tool_calls, lang)
+                            tool_msg = self.client.make_tool_results(results)
+                            if isinstance(tool_msg, list):
+                                self.history.extend(tool_msg)
+                            else:
+                                self.history.append(tool_msg)
+                            continue
+                # Main-model call (normal path, or fast-path retry).
+                if on_token is not None:
+                    response = self.client.chat_stream(
+                        self._system(lang), self.history, tools_for_call,
+                        on_token=on_token)
+                else:
+                    response = self.client.chat(self._system(lang), self.history, tools_for_call)
                 self.history.append(self.client.make_assistant_message(response))
 
                 if not response.tool_calls:
+                    _status("replying")
                     self._trim_history()
                     return _strip_tool_markup(response.text) or "Done."
 
+                _status("doing")
                 results = self._exec_calls(response.tool_calls, lang)
 
                 tool_msg = self.client.make_tool_results(results)

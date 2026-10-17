@@ -56,7 +56,7 @@ a = Analysis(
     ["ultron_app.py"],
     pathex=[],
     binaries=all_binaries,
-    datas=all_datas,
+    datas=all_datas + [("assets/ultron.ico", "assets")],
     hiddenimports=all_hiddenimports,
     hookspath=[],
     hooksconfig={},
@@ -82,7 +82,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,                           # add an .ico path here if you want a custom icon
+    icon="assets/ultron.ico",            # professional Ultron app icon
 )
 
 coll = COLLECT(

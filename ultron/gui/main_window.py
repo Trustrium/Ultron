@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import html
+import inspect
 import threading
 import traceback
 
@@ -31,7 +32,7 @@ from PySide6.QtWidgets import (
     QTextEdit, QComboBox, QStatusBar, QFrame, QSizePolicy, QLineEdit,
     QListWidget, QListWidgetItem,
 )
-from PySide6.QtGui import QFont, QColor
+from PySide6.QtGui import QFont, QColor, QIcon
 
 from .worker import UltronWorker
 from .settings_dialog import SettingsDialog
@@ -68,6 +69,41 @@ STATUS_LABEL = {
     "error": "❌  Error",
 }
 
+# Status-pill styling per state: (pill border, dot color). The pill
+# updates immediately from every worker status signal — no polling.
+_STATUS_PILL_STYLE = {
+    "idle": ("#322B5C", "#8B5CF6"),
+    "starting": ("#F59E0B", "#F59E0B"),
+    "listening": ("#FF6A00", "#FF6A00"),
+    "thinking": ("#A855F7", "#A855F7"),
+    "speaking": ("#EC4899", "#EC4899"),
+    "error": ("#F87171", "#F87171"),
+}
+
+# Stage pills: Listening -> Understanding -> Doing. Exactly one is
+# "active" at a time, driven by _on_status.
+_STAGE_ORDER = ("listening", "thinking", "speaking")
+_STAGE_TITLES = {
+    "listening": "●  Listening",
+    "thinking": "●  Understanding",
+    "speaking": "●  Doing",
+}
+
+
+def _supports_on_token(fn) -> bool:
+    """True if fn accepts an on_token= keyword (or **kwargs).
+
+    Defensive probe only — never calls fn, never crashes on builtins
+    or callables without a signature.
+    """
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    if "on_token" in params:
+        return True
+    return any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+
 # Quick command chips: label -> spoken/typed command text.
 _QUICK_COMMANDS = [
     ("📋  Briefing", "morning briefing"),
@@ -85,12 +121,27 @@ _TOPICS = [
 ]
 
 _BUBBLE_STYLE = {
-    "you": ("#4C2E85", "#FFFFFF", "right"),
-    "ultron": ("#2D2350", "#FFE2F0", "left"),
-    "system": ("#221A3B", "#C4B8E8", "center"),
+    "you": ("#3A2E7A", "#FFFFFF", "right"),
+    "ultron": ("#241F42", "#FFFFFF", "left"),
+    "system": ("#1B1730", "#C4B8E8", "center"),
     "reminder": ("#3A2E14", "#FFD84D", "left"),
     "error": ("#4A1A1A", "#FF8A8A", "left"),
 }
+
+
+def _app_icon() -> QIcon:
+    """Window icon from assets/ultron.ico, with a safe empty fallback."""
+    try:
+        from .ultron_theme import find_app_icon
+
+        path = find_app_icon()
+        if path:
+            icon = QIcon(path)
+            if not icon.isNull():
+                return icon
+    except Exception:
+        pass
+    return QIcon()
 
 
 class MainWindow(QMainWindow):
@@ -99,17 +150,22 @@ class MainWindow(QMainWindow):
     _text_status = Signal(str)
     _text_typing = Signal(bool)
     _text_stages = Signal(str)
+    # Streaming signals (defensive: only emitted when the backend
+    # exposes an on_token callback; otherwise never fired).
+    _text_stream_begin = Signal()
+    _text_token = Signal(str)
 
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Ultron — Aura")
+        self.setWindowIcon(_app_icon())
         try:
             from .ultron_theme import WINDOW_STYLESHEET as _ULTRON_SS
             self.setStyleSheet(_ULTRON_SS)
         except Exception:
             pass
-        self.resize(1020, 680)
-        self.setMinimumSize(940, 620)
+        self.resize(1080, 720)
+        self.setMinimumSize(960, 640)
 
         s = load_settings()
         self.worker = UltronWorker(self)
@@ -117,48 +173,86 @@ class MainWindow(QMainWindow):
         self.worker.message_logged.connect(self._on_log)
         self.worker.error.connect(self._on_error)
         self.worker.level_changed.connect(self._on_level)
+        # Streaming from the voice worker (no-op if the backend has no
+        # token callback — getattr keeps old workers working).
+        _token_begin = getattr(self.worker, "token_stream_started", None)
+        if _token_begin is not None:
+            _token_begin.connect(self._begin_streaming)
+        _token_changed = getattr(self.worker, "token_changed", None)
+        if _token_changed is not None:
+            _token_changed.connect(self._append_stream_token)
         # Text-runner signals -> same slots as the voice worker.
         self._text_log.connect(self._on_log)
         self._text_status.connect(self._on_status)
         self._text_typing.connect(self._set_typing_direct)
         self._text_stages.connect(self._set_stages_direct)
+        self._text_stream_begin.connect(self._begin_streaming)
+        self._text_token.connect(self._append_stream_token)
         self._text_busy = False
         self._text_cancel = False
+        # Streaming state: partial tokens accumulate here until the
+        # full reply arrives via _on_log, which then replaces them.
+        self._streaming = False
+        self._stream_text = ""
+        self._typing_dots = 0
+        self._typing_timer = QTimer(self)
+        self._typing_timer.setInterval(400)
+        self._typing_timer.timeout.connect(self._tick_typing_dots)
 
         central = QWidget()
         root = QVBoxLayout(central)
-        root.setContentsMargins(12, 12, 12, 8)
-        root.setSpacing(10)
+        root.setContentsMargins(16, 16, 16, 8)
+        root.setSpacing(8)
         self.setCentralWidget(central)
 
-        # ---- Header ---------------------------------------------------
+        # ---- Header: Trustrium branding + status pill ---------------
         header = QFrame()
         header.setObjectName("auraHeader")
         header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(14, 10, 14, 10)
-        header_layout.setSpacing(12)
+        header_layout.setContentsMargins(16, 16, 16, 16)
+        header_layout.setSpacing(16)
+
+        # Brand mark: orange rounded tile with a white "U".
+        brand_mark = QFrame()
+        brand_mark.setObjectName("brandMark")
+        brand_mark.setFixedSize(40, 40)
+        brand_layout = QHBoxLayout(brand_mark)
+        brand_layout.setContentsMargins(0, 0, 0, 0)
+        brand_letter = QLabel("U")
+        brand_letter.setObjectName("brandMarkLetter")
+        brand_letter.setAlignment(Qt.AlignCenter)
+        brand_layout.addWidget(brand_letter)
+        header_layout.addWidget(brand_mark)
 
         title_col = QVBoxLayout()
         title_col.setSpacing(0)
+        eyebrow_label = QLabel("TRUSTRIUM  •  AGI ASSISTANT")
+        eyebrow_label.setObjectName("brandEyebrow")
         title_label = QLabel("ULTRON")
         title_label.setObjectName("auraTitle")
-        subtitle_label = QLabel("TRUSTRIUM  •  AURA  •  AGI")
+        subtitle_label = QLabel("AURA  •  PLAN → EXECUTE → VERIFY")
         subtitle_label.setObjectName("auraSubtitle")
+        title_col.addWidget(eyebrow_label)
         title_col.addWidget(title_label)
         title_col.addWidget(subtitle_label)
         header_layout.addLayout(title_col)
         header_layout.addStretch(1)
 
-        # Status pill: dot + text (preserved attribute names).
+        # Status pill: dot + text in a bordered pill (preserved
+        # attribute names status_dot / status_text).
+        status_pill = QFrame()
+        status_pill.setObjectName("statusPill")
+        pill_layout = QHBoxLayout(status_pill)
+        pill_layout.setContentsMargins(12, 8, 12, 8)
+        pill_layout.setSpacing(8)
         self.status_dot = QLabel("●")
-        self.status_dot.setStyleSheet("color: #8B5CF6; font-size: 20px;")
+        self.status_dot.setObjectName("statusPillDot")
+        self.status_dot.setStyleSheet("color: #8B5CF6;")
         self.status_text = QLabel("Idle")
-        f = QFont()
-        f.setBold(True)
-        f.setPointSize(11)
-        self.status_text.setFont(f)
-        header_layout.addWidget(self.status_dot)
-        header_layout.addWidget(self.status_text)
+        self.status_text.setObjectName("statusPillText")
+        pill_layout.addWidget(self.status_dot)
+        pill_layout.addWidget(self.status_text)
+        header_layout.addWidget(status_pill)
         header_layout.addStretch(1)
 
         # Mode picker + Settings / History (preserved widgets).
@@ -179,18 +273,18 @@ class MainWindow(QMainWindow):
 
         # ---- Body: History sidebar + center ---------------------------
         body = QHBoxLayout()
-        body.setSpacing(12)
+        body.setSpacing(16)
         root.addLayout(body, 1)
 
         # Left sidebar: History + system mini panel.
         left = QFrame()
         left.setObjectName("historyPanel")
-        left.setFixedWidth(230)
+        left.setFixedWidth(232)
         left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(10, 10, 10, 10)
+        left_layout.setContentsMargins(16, 16, 16, 16)
         left_layout.setSpacing(8)
         hist_title = QLabel("HISTORY")
-        hist_title.setStyleSheet("color: #8E83B8; font-size: 9px; font-weight: 700; letter-spacing: 2px;")
+        hist_title.setObjectName("sectionLabel")
         left_layout.addWidget(hist_title)
         self.history_list = QListWidget()
         self.history_list.setObjectName("auraHistory")
@@ -199,7 +293,7 @@ class MainWindow(QMainWindow):
         self.history_refresh_btn.setObjectName("auraChipBtn")
         left_layout.addWidget(self.history_refresh_btn)
         sys_title = QLabel("SYSTEM")
-        sys_title.setStyleSheet("color: #8E83B8; font-size: 9px; font-weight: 700; letter-spacing: 2px;")
+        sys_title.setObjectName("sectionLabel")
         left_layout.addWidget(sys_title)
         self.cpu_label = QLabel("CPU: —")
         self.ram_label = QLabel("RAM: —")
@@ -214,8 +308,8 @@ class MainWindow(QMainWindow):
         center = QFrame()
         center.setObjectName("centerPanel")
         center_layout = QVBoxLayout(center)
-        center_layout.setContentsMargins(14, 14, 14, 12)
-        center_layout.setSpacing(10)
+        center_layout.setContentsMargins(16, 16, 16, 16)
+        center_layout.setSpacing(8)
         body.addWidget(center, 1)
 
         # Aura orb (hero). Alias hud_core -> same object for compatibility
@@ -248,13 +342,28 @@ class MainWindow(QMainWindow):
 
         # AGI stages line: Thinking -> Acting -> Verifying (never faked).
         self.agi_label = QLabel("Thinking → Acting → Verifying")
-        self.agi_label.setStyleSheet("color: #8E83B8; font-size: 10px;")
+        self.agi_label.setObjectName("agiLabel")
         self.agi_label.setAlignment(Qt.AlignCenter)
         center_layout.addWidget(self.agi_label)
 
+        # Stage pills: Listening / Understanding / Doing — exactly one
+        # lights up per worker status, for immediate feedback.
+        stage_row = QHBoxLayout()
+        stage_row.setSpacing(8)
+        stage_row.addStretch(1)
+        self._stage_pills: dict[str, QLabel] = {}
+        for key in _STAGE_ORDER:
+            pill = QLabel(_STAGE_TITLES[key])
+            pill.setObjectName("stagePill")
+            pill.setAlignment(Qt.AlignCenter)
+            stage_row.addWidget(pill)
+            self._stage_pills[key] = pill
+        stage_row.addStretch(1)
+        center_layout.addLayout(stage_row)
+
         # Mode cards: Chat / Talk (Echo Mind style).
         cards = QHBoxLayout()
-        cards.setSpacing(10)
+        cards.setSpacing(8)
         self.chat_card = QPushButton("💬  Chat with Ultron\nType — keyboard")
         self.chat_card.setObjectName("auraModeCard")
         self.chat_card.setMinimumHeight(64)
@@ -273,18 +382,55 @@ class MainWindow(QMainWindow):
         self.log_view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         center_layout.addWidget(self.log_view, 1)
 
-        # Typing indicator (hidden unless thinking).
+        # Typing indicator (hidden unless thinking) + skeleton bars.
         self.typing_label = QLabel("Ultron is thinking…")
-        self.typing_label.setStyleSheet("color: #C4B8E8; font-size: 11px; font-style: italic;")
+        self.typing_label.setObjectName("typingLabel")
         self.typing_label.setVisible(False)
         center_layout.addWidget(self.typing_label)
+        self.skeleton_frame = QFrame()
+        skeleton_layout = QVBoxLayout(self.skeleton_frame)
+        skeleton_layout.setContentsMargins(0, 0, 0, 0)
+        skeleton_layout.setSpacing(8)
+        self._skeleton_bars: list[QFrame] = []
+        for width in (280, 220, 180):
+            bar = QFrame()
+            bar.setObjectName("skeletonBar")
+            bar.setFixedSize(width, 12)
+            skeleton_layout.addWidget(bar)
+            self._skeleton_bars.append(bar)
+        self.skeleton_frame.setVisible(False)
+        center_layout.addWidget(self.skeleton_frame)
+
+        # Streaming frame: shows partial tokens live while a reply is
+        # being generated. Hidden again when the full reply lands.
+        self.stream_frame = QFrame()
+        self.stream_frame.setObjectName("streamFrame")
+        stream_layout = QVBoxLayout(self.stream_frame)
+        stream_layout.setContentsMargins(16, 16, 16, 16)
+        stream_layout.setSpacing(8)
+        stream_header = QLabel("ULTRON  •  LIVE")
+        stream_header.setObjectName("streamHeader")
+        stream_layout.addWidget(stream_header)
+        stream_body = QHBoxLayout()
+        stream_body.setSpacing(0)
+        self.stream_label = QLabel("")
+        self.stream_label.setObjectName("streamText")
+        self.stream_label.setWordWrap(True)
+        self.stream_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.stream_cursor = QLabel("▍")
+        self.stream_cursor.setObjectName("streamCursor")
+        stream_body.addWidget(self.stream_label, 1)
+        stream_body.addWidget(self.stream_cursor)
+        stream_layout.addLayout(stream_body)
+        self.stream_frame.setVisible(False)
+        center_layout.addWidget(self.stream_frame)
 
         # Quick actions + Topics chips above the input bar.
         chips_label = QLabel("QUICK ACTIONS  •  TOPICS")
-        chips_label.setStyleSheet("color: #8E83B8; font-size: 9px; font-weight: 700; letter-spacing: 2px;")
+        chips_label.setObjectName("sectionLabel")
         center_layout.addWidget(chips_label)
         chips_row = QHBoxLayout()
-        chips_row.setSpacing(6)
+        chips_row.setSpacing(8)
         self.chip_buttons: list[QPushButton] = []
         for label, command in _QUICK_COMMANDS:
             btn = QPushButton(label)
@@ -301,8 +447,11 @@ class MainWindow(QMainWindow):
         chips_row.addStretch(1)
         center_layout.addLayout(chips_row)
 
-        # Input bar: text + mic + send.
-        input_row = QHBoxLayout()
+        # Input bar: text + mic + send, inside a polished pill frame.
+        input_bar = QFrame()
+        input_bar.setObjectName("inputBar")
+        input_row = QHBoxLayout(input_bar)
+        input_row.setContentsMargins(8, 8, 8, 8)
         input_row.setSpacing(8)
         self.input_edit = QLineEdit()
         self.input_edit.setObjectName("auraInput")
@@ -316,7 +465,7 @@ class MainWindow(QMainWindow):
         input_row.addWidget(self.input_edit, 1)
         input_row.addWidget(self.mic_btn)
         input_row.addWidget(self.send_btn)
-        center_layout.addLayout(input_row)
+        center_layout.addWidget(input_bar)
 
         # Talk / Start / Stop row (preserved widgets).
         controls = QHBoxLayout()
@@ -568,7 +717,32 @@ class MainWindow(QMainWindow):
             conv_log("user", text, lang)
             self._text_stages.emit("🧠 Thinking → ⚙️ Acting — calling tools…")
             brain = Brain()
-            reply = brain.think(text, lang=lang)
+            # Streaming (defensive): if the backend exposes an
+            # on_token callback, show partial tokens live as they
+            # arrive. Otherwise fall back to the full-reply path —
+            # never crash, never hang, never fake a reply.
+            reply: str
+            if _supports_on_token(brain.think):
+                self._text_stream_begin.emit()
+
+                def _on_token(token, _self=self) -> None:
+                    try:
+                        _self._text_token.emit(str(token))
+                    except Exception:
+                        pass
+
+                try:
+                    reply = brain.think(text, lang=lang, on_token=_on_token)
+                except TypeError as exc:
+                    # Only retry when the TypeError is actually about
+                    # on_token; a TypeError inside the backend must
+                    # surface as the turn error, not a double turn.
+                    if "on_token" in str(exc):
+                        reply = brain.think(text, lang=lang)
+                    else:
+                        raise
+            else:
+                reply = brain.think(text, lang=lang)
             if self._text_cancel:
                 self._text_log.emit("system", "Cancelled.")
                 self._text_status.emit("idle")
@@ -671,18 +845,25 @@ class MainWindow(QMainWindow):
     # --- signals from worker ---
     def _on_status(self, s: str):
         self.status_text.setText(STATUS_LABEL.get(s, s.capitalize()))
-        color = STATUS_COLOR.get(s, "#8B5CF6")
-        self.status_dot.setStyleSheet(f"color: {color}; font-size: 20px;")
+        border, dot = _STATUS_PILL_STYLE.get(s, ("#322B5C", "#8B5CF6"))
+        self.status_dot.setStyleSheet(f"color: {dot};")
         # Drive Aura visuals: orb + spectrum tint + enabled state.
         try:
             self.aura_orb.set_state(s)
         except Exception:
             pass
         try:
-            self.waveform.set_color(color)
+            self.waveform.set_color(dot)
         except Exception:
             pass
         self.waveform.set_enabled_view(s == "listening")
+        # Stage pills: immediate listening / understanding / doing.
+        self._update_stage_pills(s)
+        # Typing + skeleton: on while thinking, off otherwise.
+        if s == "thinking":
+            self._set_typing_direct(True)
+        elif s in ("speaking", "idle", "error"):
+            self._set_typing_direct(False)
         # Voice-screen state: full listening banner.
         try:
             self.listening_banner.setVisible(s == "listening")
@@ -697,6 +878,17 @@ class MainWindow(QMainWindow):
         elif s == "idle":
             pass  # keep the last stages line; next turn overwrites it.
 
+    def _update_stage_pills(self, state: str) -> None:
+        """Light exactly one stage pill (listening/thinking/speaking)."""
+        for key, pill in self._stage_pills.items():
+            pill.setObjectName("stagePillActive" if key == state else "stagePill")
+            # Object-name change needs a re-polish to take effect.
+            try:
+                pill.style().unpolish(pill)
+                pill.style().polish(pill)
+            except Exception:
+                pass
+
     def _on_level(self, level: float):
         self.waveform.set_level(level)
         try:
@@ -705,16 +897,86 @@ class MainWindow(QMainWindow):
             pass
 
     def _on_log(self, role: str, text: str):
+        # A finished reply replaces any live streaming preview —
+        # never show both the partial tokens and the full bubble.
+        if role == "ultron":
+            self._finish_streaming()
+            self._set_typing_direct(False)
+        elif role == "you":
+            self._finish_streaming()
         self._append(role, text)
 
     def _on_error(self, msg: str):
         self._append("error", msg)
         self._on_status("error")
 
-    # --- typing / stages (GUI thread) -------------------------------
+    # --- typing / stages / streaming (GUI thread) -------------------
     def _set_typing_direct(self, on: bool):
         try:
             self.typing_label.setVisible(bool(on))
+            if on:
+                self._typing_dots = 0
+                self.typing_label.setText("Ultron is thinking")
+                if not self._typing_timer.isActive():
+                    self._typing_timer.start()
+            else:
+                self._typing_timer.stop()
+            try:
+                self.skeleton_frame.setVisible(bool(on))
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _tick_typing_dots(self) -> None:
+        """Animate the typing indicator: . -> .. -> ... (400 ms)."""
+        try:
+            if not self.typing_label.isVisible():
+                return
+            self._typing_dots = (self._typing_dots + 1) % 4
+            self.typing_label.setText(
+                "Ultron is thinking" + "." * self._typing_dots
+            )
+        except Exception:
+            pass
+
+    def _begin_streaming(self) -> None:
+        """Show the live streaming frame; tokens append via _append_stream_token."""
+        try:
+            self._streaming = True
+            self._stream_text = ""
+            self.stream_label.setText("")
+            self.stream_frame.setVisible(True)
+            self._set_typing_direct(False)
+            scrollbar = self.log_view.verticalScrollBar()
+            scrollbar.setValue(scrollbar.maximum())
+        except Exception:
+            pass
+
+    def _append_stream_token(self, token: str) -> None:
+        """Append one partial token to the live streaming bubble."""
+        try:
+            if not token:
+                return
+            if not self._streaming:
+                self._begin_streaming()
+            self._stream_text += token
+            # Cap the live preview so a runaway stream can't grow
+            # the label without bound; the full reply still lands
+            # in the chat bubble via _on_log.
+            preview = self._stream_text
+            if len(preview) > 4000:
+                preview = preview[:4000] + "…"
+            self.stream_label.setText(preview)
+        except Exception:
+            pass
+
+    def _finish_streaming(self) -> None:
+        """Hide the live streaming frame (full reply replaces it)."""
+        try:
+            self._streaming = False
+            self._stream_text = ""
+            self.stream_frame.setVisible(False)
         except Exception:
             pass
 

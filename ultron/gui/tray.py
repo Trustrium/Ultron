@@ -1,22 +1,34 @@
 """System tray icon — keeps Ultron accessible without a visible window."""
 from __future__ import annotations
+
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon, QPixmap, QPainter, QBrush, QColor, QAction
 from PySide6.QtWidgets import QSystemTrayIcon, QMenu, QApplication
 
 
 def _generate_icon() -> QIcon:
-    """Draw a simple 64x64 'J' badge icon at runtime (no external asset needed)."""
+    """Tray icon: prefer the professional assets/ultron.ico; fall back
+    to a drawn orange 'U' badge (no external asset needed)."""
+    try:
+        from .ultron_theme import find_app_icon
+
+        path = find_app_icon()
+        if path:
+            icon = QIcon(path)
+            if not icon.isNull():
+                return icon
+    except Exception:
+        pass
     pix = QPixmap(64, 64)
     pix.fill(Qt.transparent)
     p = QPainter(pix)
     p.setRenderHint(QPainter.Antialiasing)
-    p.setBrush(QBrush(QColor("#1f6feb")))
+    p.setBrush(QBrush(QColor("#FF6A00")))
     p.setPen(Qt.NoPen)
     p.drawEllipse(2, 2, 60, 60)
     p.setPen(QColor("white"))
     f = p.font(); f.setBold(True); f.setPointSize(28); p.setFont(f)
-    p.drawText(pix.rect(), Qt.AlignCenter, "J")
+    p.drawText(pix.rect(), Qt.AlignCenter, "U")
     p.end()
     return QIcon(pix)
 

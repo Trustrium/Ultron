@@ -71,7 +71,7 @@ class AuraOrbWidget(QWidget):
         self._phase = 0.0
         self._swirl = 0.0
         self._timer = QTimer(self)
-        self._timer.setInterval(33)  # ~30 fps
+        self._timer.setInterval(16)  # ~60 fps — smooth micro-interactions
         self._timer.timeout.connect(self._tick)
         self._timer.start()
 

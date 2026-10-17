@@ -12,6 +12,30 @@ import sounddevice as sd
 from PySide6.QtCore import QObject, Signal
 
 
+def _supports_kw(fn, name: str) -> bool:
+    """True if fn accepts a ``name``= keyword (or **kwargs).
+
+    Defensive probe only — never calls fn, never raises.
+    """
+    import inspect
+
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    if name in params:
+        return True
+    return any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
+def _supports_on_token(fn) -> bool:
+    """True if fn accepts an on_token= keyword (or **kwargs).
+
+    Defensive probe only — never calls fn, never raises.
+    """
+    return _supports_kw(fn, "on_token")
+
+
 class UltronWorker(QObject):
     """Wraps the voice loop in a worker thread.
 
@@ -25,6 +49,12 @@ class UltronWorker(QObject):
     message_logged = Signal(str, str)
     error = Signal(str)
     level_changed = Signal(float)        # 0.0 - 1.0 mic level, ~30/s while listening
+    # Streaming (defensive): emitted only when the backend exposes an
+    # on_token callback. GUIs connect via getattr so older workers
+    # without these signals keep working. The full reply still arrives
+    # via message_logged, which replaces the live preview.
+    token_stream_started = Signal()
+    token_changed = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -227,9 +257,47 @@ class UltronWorker(QObject):
     def _process_turn(self, brain, text, lang, speak, conv_log) -> None:
         self._emit_log("you", text)
         conv_log("user", text, lang)
+        # IMMEDIATE feedback: emit BEFORE brain.think() blocks on the LLM call,
+        # so the UI never sits silent during the ~1-10s think. The on_status
+        # callback below adds "Doing…" / "Replying…" lines as the turn proceeds.
         self._emit_status("thinking")
+        self._emit_log("system", "Understanding…")
+        # Streaming (defensive): if the backend exposes on_token / on_status,
+        # forward partial tokens + status live; otherwise the full-reply path
+        # below runs unchanged. Never crashes if streaming is absent.
         try:
-            reply = brain.think(text, lang=lang)
+            kwargs: dict = {}
+            if _supports_on_token(brain.think):
+                try:
+                    self.token_stream_started.emit()
+                except Exception:
+                    pass
+
+                def _on_token(token) -> None:
+                    try:
+                        self.token_changed.emit(str(token))
+                    except Exception:
+                        pass
+
+                kwargs["on_token"] = _on_token
+            if _supports_kw(brain.think, "on_status"):
+                def _on_status(s: str) -> None:
+                    if s == "doing":
+                        self._emit_log("system", "Doing…")
+                    elif s == "replying":
+                        self._emit_log("system", "Replying…")
+
+                kwargs["on_status"] = _on_status
+            try:
+                reply = brain.think(text, lang=lang, **kwargs)
+            except TypeError as exc:
+                # Only retry when the TypeError is actually about a callback
+                # kwarg; a TypeError inside the backend must surface as the
+                # turn error, not a double turn.
+                if "on_token" in str(exc) or "on_status" in str(exc):
+                    reply = brain.think(text, lang=lang)
+                else:
+                    raise
         except Exception as e:
             traceback.print_exc()
             reply = f"Sorry, something broke: {e}"
@@ -266,6 +334,10 @@ class UltronWorker(QObject):
     def request_voice_turn(self) -> None:
         """Trigger a single voice turn from voice-mode worker."""
         self._voice_trigger = True
+        # Immediate feedback: status flips the moment the user taps Talk,
+        # not up to a poll interval later (loop polls every 0.1s, but the
+        # emit here makes it synchronous with the tap).
+        self._emit_status("listening")
 
     def _run_wake_mode(self, brain, speak, listen, record_until_silence,
                        transcribe, calibrate_silence, conv_log, followup_seconds) -> None:

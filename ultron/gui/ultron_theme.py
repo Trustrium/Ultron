@@ -10,6 +10,44 @@ get_stylesheet() keep their original names and meanings.
 """
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+
+def find_app_icon() -> str | None:
+    """Locate assets/ultron.ico for the window / tray icon.
+
+    Checks the PyInstaller bundle dir, the repo layout, and the CWD.
+    Returns a path string or None (caller falls back to a drawn icon).
+    """
+    candidates: list[Path] = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(Path(meipass) / "assets" / "ultron.ico")
+    here = Path(__file__).resolve()
+    for parent in (here, *here.parents):
+        candidates.append(parent / "assets" / "ultron.ico")
+    candidates.append(Path.cwd() / "assets" / "ultron.ico")
+    for cand in candidates:
+        try:
+            if cand.is_file():
+                return str(cand)
+        except Exception:
+            continue
+    return None
+
+
+# v3 design tokens (8px grid, typography hierarchy) — additive, safe to
+# import from either ultron_theme or aura_theme.
+SPACING = {"xs": 8, "sm": 16, "md": 24, "lg": 32}
+TYPE_SCALE = {
+    "display": ("Inter", 24, 900),
+    "title": ("Inter", 16, 700),
+    "body": ("Inter", 11, 400),
+    "label": ("Inter", 10, 600),
+    "caption": ("Inter", 9, 700),
+}
+
 COLORS = {
     "background": "#0B0D12",
     "surface": "#14171F",
@@ -73,6 +111,14 @@ HUD_PALETTE = {
     "bubble_ultron": "#2A1E14",
     "bubble_system": "#1A1D24",
     "bubble_error": "#3A1A1A",
+    # --- v3 additions (additive keys; old keys untouched) ---
+    "surface_elevated": "#241F42",
+    "border_subtle": "#2A2450",
+    "input_bg": "#16122A",
+    "orange_soft": "#FF8C42",
+    "green_soft": "#34D399",
+    "amber_soft": "#F59E0B",
+    "red_soft": "#F87171",
 }
 
 WINDOW_STYLESHEET = """
@@ -248,3 +294,46 @@ except Exception:  # pragma: no cover - Aura theme is optional
     AURA_GRADIENT = ()
     AURA_STATE_COLORS = {}
     AURA_STYLESHEET = ""
+
+
+# --- Ultron v3: agency-grade polish layer ---------------------------
+# Original styling, applied LAST so it wins over HUD + Aura defaults
+# for the shared controls. Covers states the earlier sheets missed:
+# focus rings, disabled states, tooltips, menus, status/stage pills,
+# streaming frame, skeleton bars, and the Trustrium brand header.
+V3_STYLESHEET = """
+QToolTip {
+    background-color: #241F42;
+    color: #FFFFFF;
+    border: 1px solid #322B5C;
+    border-radius: 8px;
+    padding: 8px 12px;
+    font-size: 10pt;
+}
+QPushButton:focus { border-color: #8B5CF6; }
+QPushButton:disabled {
+    color: #8E83B8;
+    background-color: #1B1730;
+    border-color: #2A2450;
+}
+QFrame#statusPill {
+    background-color: rgba(45, 36, 80, 0.9);
+    border: 1px solid #322B5C;
+    border-radius: 12px;
+}
+QLabel#statusPillText { color: #FFFFFF; font-size: 10pt; font-weight: 600; }
+QLabel#brandEyebrow { color: #FF8C42; font-size: 9pt; font-weight: 700; letter-spacing: 2px; }
+QFrame#brandMark { background-color: #FF6A00; border-radius: 12px; border: 1px solid #FF8C42; }
+QLabel#brandMarkLetter { color: #FFFFFF; font-size: 16pt; font-weight: 900; }
+QLabel#sectionLabel { color: #8E83B8; font-size: 9pt; font-weight: 700; letter-spacing: 2px; }
+QFrame#inputBar { background-color: #16122A; border: 1px solid #322B5C; border-radius: 16px; }
+QLineEdit#auraInput { background-color: transparent; border: none; }
+QFrame#streamFrame { background-color: rgba(36, 31, 66, 0.92); border: 1px solid #8B5CF6; border-radius: 16px; }
+QLabel#streamHeader { color: #C4B8E8; font-size: 9pt; font-weight: 700; letter-spacing: 2px; }
+QLabel#streamText { color: #FFFFFF; font-size: 11pt; }
+QLabel#streamCursor { color: #FF8C42; font-size: 11pt; font-weight: 700; }
+QFrame#skeletonBar { background-color: #241F42; border-radius: 8px; }
+QLabel#typingLabel { color: #C4B8E8; font-size: 11pt; font-style: italic; }
+"""
+
+WINDOW_STYLESHEET = WINDOW_STYLESHEET + "\n" + V3_STYLESHEET

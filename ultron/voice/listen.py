@@ -6,20 +6,36 @@ import numpy as np
 import sounddevice as sd
 from faster_whisper import WhisperModel
 
-from ..config import WHISPER_MODEL, MAX_LISTEN_SECONDS
+from ..config import (
+    WHISPER_MODEL, MAX_LISTEN_SECONDS,
+    LISTEN_SILENCE_SECONDS, LISTEN_MIN_SPEECH_SECONDS, LISTEN_CALIBRATE_SECONDS,
+)
+from .language import normalize_language_code, detect_text_language
+
+__all__ = [
+    "SAMPLE_RATE", "SILENCE_THRESHOLD", "SILENCE_DURATION", "MIN_SPEECH_SECONDS",
+    "calibrate_silence", "record_until_silence", "transcribe", "listen",
+    "normalize_language_code", "detect_text_language",
+]
 
 SAMPLE_RATE = 16000
 SILENCE_THRESHOLD = 0.012      # RMS below this is "silence" — overridden by calibrate_silence()
-SILENCE_DURATION = 0.8         # seconds of silence to stop (lower = snappier response)
-MIN_SPEECH_SECONDS = 0.5
+# Seconds of silence to stop (lower = snappier response). Configurable via
+# .env LISTEN_SILENCE_SECONDS (default 0.5s, was hardcoded 0.8s). Honest target:
+# first token <1s after speech ends is NOT guaranteed — this only shortens the
+# tail wait before transcription starts.
+SILENCE_DURATION = LISTEN_SILENCE_SECONDS
+MIN_SPEECH_SECONDS = LISTEN_MIN_SPEECH_SECONDS
 
 _current_silence_threshold = SILENCE_THRESHOLD
 
 
-def calibrate_silence(seconds: float = 0.8) -> float:
+def calibrate_silence(seconds: float | None = None) -> float:
     """Sample ambient noise and set the silence threshold above it. Returns the chosen threshold."""
     import time
     global _current_silence_threshold
+    if seconds is None:
+        seconds = LISTEN_CALIBRATE_SECONDS
     samples_rms: list[float] = []
     end = time.time() + seconds
     try:
@@ -111,7 +127,11 @@ def _normalize_audio(audio: np.ndarray, target_peak: float = 0.35,
 
 
 def transcribe(audio: np.ndarray) -> tuple[str, str]:
-    """Return (text, language_code). language_code is 'ta', 'en', 'roman_urdu', etc. Whisper returns 'ur' for Urdu speech — map it to roman_urdu."""
+    """Return (text, language_code). language_code is a canonical code from
+    ultron.voice.language: 'en', 'hindi', 'urdu', 'roman_urdu', 'ta', ...
+    Whisper returns 'hi' for Hindi speech and 'ur' for Urdu speech — both are
+    kept as-is (hi -> hindi, ur -> urdu). 'roman_urdu' is ONLY for Latin-script
+    written text, never for speech."""
     if audio.size == 0:
         return "", "en"
     audio = _normalize_audio(audio)
@@ -121,23 +141,17 @@ def transcribe(audio: np.ndarray) -> tuple[str, str]:
             audio,
             beam_size=1,
             vad_filter=True,
-            language=None,  # auto-detect (English / Roman Urdu / Tamil)
+            language=None,  # auto-detect (English / Hindi / Urdu / Tamil / ...)
         )
         text = " ".join(s.text.strip() for s in segments).strip()
-        _lg = (info.language or "en").lower()
-        if _lg in ("ur", "urdu"):
-            _lg = "roman_urdu"
-        return text, _lg
+        return text, normalize_language_code(info.language or "en")
     except Exception as e:
         # VAD model download failure or any other transcribe error — retry without VAD.
         print(f"[listen] transcribe with VAD failed ({e}); retrying without VAD.")
         try:
             segments, info = model.transcribe(audio, beam_size=1, vad_filter=False, language=None)
             text = " ".join(s.text.strip() for s in segments).strip()
-            _lg2 = (info.language or "en").lower()
-            if _lg2 in ("ur", "urdu"):
-                _lg2 = "roman_urdu"
-            return text, _lg2
+            return text, normalize_language_code(info.language or "en")
         except Exception as e2:
             print(f"[listen] transcribe failed: {e2}")
             return "", "en"

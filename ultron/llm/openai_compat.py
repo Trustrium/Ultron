@@ -26,10 +26,18 @@ class OpenAICompatClient(LLMClient):
         self.client = OpenAI(**kwargs)
         self.model = model
         self.max_tokens = max_tokens
+        # Kept so clone_with_model() can rebuild an identical client on another model.
+        self._api_key = api_key
+        self._base_url = base_url
 
-    # --- core call --------------------------------------------------------------
-    def chat(self, system: str, history: list, tools: list[dict]) -> AssistantResponse:
-        oa_tools = [
+    def clone_with_model(self, model: str) -> "OpenAICompatClient":
+        clone = OpenAICompatClient(api_key=self._api_key, model=model,
+                                   base_url=self._base_url, max_tokens=self.max_tokens)
+        clone._provider_id = getattr(self, "_provider_id", "openai_compat")
+        return clone
+
+    def _oa_tools(self, tools: list[dict]) -> list[dict]:
+        return [
             {
                 "type": "function",
                 "function": {
@@ -40,6 +48,10 @@ class OpenAICompatClient(LLMClient):
             }
             for t in tools
         ]
+
+    # --- core call --------------------------------------------------------------
+    def chat(self, system: str, history: list, tools: list[dict]) -> AssistantResponse:
+        oa_tools = self._oa_tools(tools)
         messages = [{"role": "system", "content": system}] + history
         kwargs = dict(
             model=self.model,
@@ -74,6 +86,79 @@ class OpenAICompatClient(LLMClient):
                 args = {}
             tool_calls.append(ToolCall(id=tc.id, name=tc.function.name, arguments=args))
         return AssistantResponse(text=(msg.content or "").strip(), tool_calls=tool_calls, raw_message=msg)
+
+    def chat_stream(self, system: str, history: list, tools: list[dict],
+                    on_token=None) -> AssistantResponse:
+        """True streaming via stream=True. Calls on_token per text delta and
+        accumulates streamed tool-call chunks (by index) into ToolCalls.
+        Returns the same full AssistantResponse chat() would. On any streaming
+        error, falls back to single-shot chat() so the turn still completes."""
+        try:
+            return self._chat_stream_inner(system, history, tools, on_token)
+        except Exception as e:
+            print(f"[llm] streaming failed ({e}); falling back to single-shot chat().")
+            return self.chat(system, history, tools)
+
+    def _chat_stream_inner(self, system: str, history: list, tools: list[dict],
+                           on_token=None) -> AssistantResponse:
+        oa_tools = self._oa_tools(tools)
+        messages = [{"role": "system", "content": system}] + history
+        kwargs = dict(
+            model=self.model,
+            messages=messages,
+            max_tokens=self.max_tokens,
+            temperature=0.6,
+            stream=True,
+        )
+        if oa_tools:
+            kwargs["tools"] = oa_tools
+            kwargs["tool_choice"] = "auto"
+        stream = self.client.chat.completions.create(**kwargs)
+        text_parts: list[str] = []
+        # Tool-call chunks arrive split across deltas; accumulate per index.
+        tc_acc: dict[int, dict] = {}
+        for chunk in stream:
+            choices = getattr(chunk, "choices", None) or []
+            if not choices:
+                continue
+            delta = getattr(choices[0], "delta", None)
+            if delta is None:
+                continue
+            content = getattr(delta, "content", None)
+            if content:
+                text_parts.append(content)
+                if on_token is not None:
+                    try:
+                        on_token(content)
+                    except Exception:
+                        pass
+            for tc_chunk in (getattr(delta, "tool_calls", None) or []):
+                idx = getattr(tc_chunk, "index", 0)
+                acc = tc_acc.setdefault(idx, {"id": "", "name": "", "arguments": ""})
+                if getattr(tc_chunk, "id", None):
+                    acc["id"] = tc_chunk.id
+                fn = getattr(tc_chunk, "function", None)
+                if fn is not None:
+                    if getattr(fn, "name", None):
+                        # Names can ALSO split across chunks — append, don't overwrite.
+                        acc["name"] += fn.name
+                    if getattr(fn, "arguments", None):
+                        acc["arguments"] += fn.arguments
+        tool_calls: list[ToolCall] = []
+        for idx in sorted(tc_acc):
+            acc = tc_acc[idx]
+            if not acc["name"]:
+                continue
+            try:
+                args = json.loads(acc["arguments"] or "{}")
+                if not isinstance(args, dict):
+                    args = {}
+            except json.JSONDecodeError:
+                args = {}
+            tool_calls.append(ToolCall(id=acc["id"] or f"stream_{idx}",
+                                       name=acc["name"], arguments=args))
+        return AssistantResponse(text="".join(text_parts).strip(),
+                                 tool_calls=tool_calls, raw_message=None)
 
     # --- message construction ---------------------------------------------------
     def make_user_message(self, text: str) -> dict:

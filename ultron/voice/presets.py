@@ -121,6 +121,48 @@ ROMAN_URDU_PRESETS: list[dict] = [
 ]
 
 
+# Hindi (Devanagari) — native hi-IN Edge voices.
+HINDI_PRESETS: list[dict] = [
+    {
+        "id": "hindi_male",
+        "label": "Hindi male (Madhur)",
+        "voice": "hi-IN-MadhurNeural",
+        "rate": "+0%",
+        "pitch": "+0Hz",
+        "description": "Hindi male voice.",
+    },
+    {
+        "id": "hindi_female",
+        "label": "Hindi female (Swara)",
+        "voice": "hi-IN-SwaraNeural",
+        "rate": "+0%",
+        "pitch": "+0Hz",
+        "description": "Hindi female voice.",
+    },
+]
+
+
+# Urdu (Arabic script) — native ur-PK Edge voices.
+URDU_PRESETS: list[dict] = [
+    {
+        "id": "urdu_male",
+        "label": "Urdu male (Asad)",
+        "voice": "ur-PK-AsadNeural",
+        "rate": "+0%",
+        "pitch": "+0Hz",
+        "description": "Urdu male voice.",
+    },
+    {
+        "id": "urdu_female",
+        "label": "Urdu female (Uzma)",
+        "voice": "ur-PK-UzmaNeural",
+        "rate": "+0%",
+        "pitch": "+0Hz",
+        "description": "Urdu female voice.",
+    },
+]
+
+
 def roman_urdu_default() -> dict:
     return ROMAN_URDU_PRESETS[0]
 

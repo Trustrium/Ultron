@@ -34,7 +34,14 @@ FOLLOWUP_VOICE_RMS = 0.025
 def on_reminder_fire(reminder: dict) -> None:
     text = reminder["text"]
     lang = reminder.get("lang", "en")
-    prefix = "Yaad-dihani: " if lang in ("roman_urdu", "ur") else ("Reminder: " if not lang.startswith("ta") else "Reminder: ")
+    if lang == "hindi":
+        prefix = "याद-दिहानी: "
+    elif lang == "urdu":
+        prefix = "یاد دہانی: "
+    elif lang in ("roman_urdu", "ur"):
+        prefix = "Yaad-dihani: "
+    else:
+        prefix = "Reminder: "
     print(f"\n[REMINDER] {text}")
     conv_log("reminder", text, lang)
     try:
@@ -93,16 +100,13 @@ def run_text_mode(brain: Brain, speak_replies: bool) -> int:
             continue
         if text.lower() in {"quit", "exit", "bye"}:
             return 0
-        # Language detection: Tamil unicode -> ta, Roman Urdu phrases -> roman_urdu, else en.
+        # Language detection: script + vocabulary (Devanagari -> hindi,
+        # Arabic block -> urdu, Tamil block -> ta, Roman-Urdu markers ->
+        # roman_urdu, else en). See ultron/voice/language.py.
         try:
-            from ultron.voice.roman_urdu import detect_roman_urdu as _detect_ru
+            from ultron.voice.language import detect_text_language as _detect_lang
+            lang = _detect_lang(text)
         except Exception:
-            _detect_ru = None
-        if any("\u0b80" <= c <= "\u0bff" for c in text):
-            lang = "ta"
-        elif _detect_ru and _detect_ru(text):
-            lang = "roman_urdu"
-        else:
             lang = "en"
         _process_user_turn(brain, text, lang, speak_reply=speak_replies)
 

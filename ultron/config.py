@@ -96,12 +96,39 @@ if _tool_limit_override.isdigit() and int(_tool_limit_override) > 0:
     TOOL_LIMIT = int(_tool_limit_override)
 
 
+# ===== Fast-path LLM (v3 latency) =====
+# Opt-in only (LLM_FAST_PATH=1). When enabled, Brain uses a small fast model
+# (default: Groq llama-3.1-8b-instant) for the FIRST call of a turn ONLY when
+# the request is a single-tool direct command detected reliably (synonym
+# match, short, no conjunctions/questions, never destructive). If the fast
+# call does not produce exactly one tool call, Brain discards it and retries
+# with the main model — the fast path is speculative, never authoritative.
+# Complex reasoning always stays on the main (70b) model.
+LLM_FAST_MODEL = os.getenv("LLM_FAST_MODEL", "llama-3.1-8b-instant").strip()
+LLM_FAST_PATH = os.getenv("LLM_FAST_PATH", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)).strip())
+    except (TypeError, ValueError):
+        return default
+
+
 # ===== Voice / wake config =====
 TTS_VOICE_TAMIL = os.getenv("TTS_VOICE_TAMIL", "ta-IN-ValluvarNeural").strip()  # legacy, kept for compat
 TTS_VOICE_ROMAN_URDU = os.getenv("TTS_VOICE_ROMAN_URDU", "en-IN-PrabhatNeural").strip()
 TTS_VOICE_ENGLISH = os.getenv("TTS_VOICE_ENGLISH", "en-US-GuyNeural").strip()
+TTS_VOICE_HINDI = os.getenv("TTS_VOICE_HINDI", "hi-IN-MadhurNeural").strip()
+TTS_VOICE_URDU = os.getenv("TTS_VOICE_URDU", "ur-PK-AsadNeural").strip()
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "tiny").strip()
 MAX_LISTEN_SECONDS = int(os.getenv("MAX_LISTEN_SECONDS", "15"))
+# Listen timings — tighter defaults for a snappier feel (v3 latency).
+# LISTEN_SILENCE_SECONDS: silence that ends a recording (was hardcoded 0.8s).
+# Keep >= 0.3s: below that, natural pauses cut the user off mid-sentence.
+LISTEN_SILENCE_SECONDS = _env_float("LISTEN_SILENCE_SECONDS", 0.5)
+LISTEN_MIN_SPEECH_SECONDS = _env_float("LISTEN_MIN_SPEECH_SECONDS", 0.5)
+LISTEN_CALIBRATE_SECONDS = _env_float("LISTEN_CALIBRATE_SECONDS", 0.8)
 
 # Home Assistant (smart home) — optional
 HA_URL = os.getenv("HA_URL", "").strip()

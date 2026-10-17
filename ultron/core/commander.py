@@ -8,9 +8,15 @@ Pipeline: Understand -> Plan -> Execute -> Verify -> Report.
 - Verify: check each step's result; stop on failure, never invent success.
 - Report: 1-2 sentence summary, addressing the user as "sir".
 
+IMPORTANT — planning preview ONLY, never dispatch: parse_command() keyword
+matching is used solely to render a human-readable plan for the `plan_task`
+tool. NO tool is ever chosen or executed from an exact-string / keyword
+match here. The live path is always Brain.think() -> LLM -> tool_router,
+where the LLM makes every tool choice. UltronCommander.run() with an executor
+only runs steps a caller explicitly supplies; the brain never routes through it.
+
 This module is dependency-free (stdlib only) so it can be unit-tested
-without an LLM key. The Brain calls it for multi-step commands; the
-Command Center plugin exposes it as tools.
+without an LLM key. The Command Center plugin exposes it as tools.
 """
 from __future__ import annotations
 

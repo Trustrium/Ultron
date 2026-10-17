@@ -1,4 +1,4 @@
-"""Text-to-speech via Edge TTS — English + Roman Urdu with Ultron preset support.
+"""Text-to-speech via Edge TTS — English + Roman Urdu + Hindi + Urdu, with Ultron preset support.
 
 Thread-safe: a single lock serializes all speak() calls so a reminder firing
 in the scheduler thread can't interrupt a reply in the main thread.
@@ -44,12 +44,28 @@ def _preset_for(lang: str) -> dict:
     """Look up the preset by language from settings (with sensible defaults)."""
     _lang = (lang or "").lower()
     is_tamil = _lang.startswith("ta")
-    is_roman_urdu = _lang in ("roman_urdu", "ur", "urdu")
+    is_roman_urdu = _lang in ("roman_urdu",)
+    is_hindi = _lang in ("hindi", "hi")
+    is_urdu = _lang in ("urdu", "ur")
     if is_roman_urdu:
         try:
             from .presets import ROMAN_URDU_PRESETS as _RU_PRESETS
             from ..config import TTS_VOICE_ROMAN_URDU as _RU_VOICE
             return dict(find_preset(_RU_PRESETS, _RU_VOICE))
+        except Exception:
+            pass
+    if is_hindi:
+        try:
+            from .presets import HINDI_PRESETS as _HI_PRESETS
+            from ..config import TTS_VOICE_HINDI as _HI_VOICE
+            return dict(find_preset(_HI_PRESETS, _HI_VOICE))
+        except Exception:
+            pass
+    if is_urdu:
+        try:
+            from .presets import URDU_PRESETS as _UR_PRESETS
+            from ..config import TTS_VOICE_URDU as _UR_VOICE
+            return dict(find_preset(_UR_PRESETS, _UR_VOICE))
         except Exception:
             pass
     presets = TAMIL_PRESETS if is_tamil else ENGLISH_PRESETS

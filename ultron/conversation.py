@@ -3,16 +3,30 @@
 After the wake word triggers once, the voice loop stays in conversation: it keeps
 listening + responding without needing "Hey Ultron" each turn, and ends gracefully
 when the user signals they're done (or after repeated silence).
+
+NOTE: is_exit_phrase() is a conversation-control convenience (end the
+follow-up loop), NOT command dispatch. No tool is ever chosen by exact-string
+matching — every request goes through Brain -> LLM -> tool_router.
 """
 from __future__ import annotations
 import re
 
-# Phrases that end the conversation (English + common Tamil/Tanglish).
+# Phrases that end the conversation (English + Roman Urdu/Hindi + Hindi
+# Devanagari + Urdu Arabic script + legacy Tamil/Tanglish).
 _EXIT_PHRASES = {
     "that's all", "thats all", "that is all", "nothing else", "no thanks",
     "goodbye", "good bye", "bye", "bye bye", "stop", "exit", "quit",
     "thank you that's it", "we're done", "were done", "i'm done", "im done",
     "go to sleep", "sleep now", "dismiss",
+    # Roman Urdu / Roman Hindi
+    "bas", "bas karo", "khatam", "khatam karo", "ho gaya", "ruk jao",
+    "khuda hafiz", "allah hafiz", "alvida", "phir milenge", "kafi hai",
+    # Hindi (Devanagari)
+    "बस", "बस करो", "खत्म", "खत्म करो", "हो गया", "रुक जाओ",
+    "खुदा हाफ़िज़", "अलविदा", "फिर मिलेंगे", "काफ़ी है",
+    # Urdu (Arabic script)
+    "بس", "بس کرو", "ختم", "ختم کرو", "ہو گیا", "رک جاؤ",
+    "خدا حافظ", "اللہ حافظ", "الوداع", "پھر ملیں گے", "کافی ہے",
     # Tamil / Tanglish
     "podhum", "pothum", "sari podhum", "nandri", "vanakkam poitu varen", "poitu vaa",
 }
@@ -37,5 +51,13 @@ def is_exit_phrase(text: str) -> bool:
 
 
 def farewell(lang: str = "en") -> str:
-    return "சரி, தேவைப்படும்போது கூப்பிடுங்கள்." if (lang or "").startswith("ta") \
-        else "Alright — call me when you need me."
+    lang = (lang or "en").lower()
+    if lang.startswith("ta"):
+        return "சரி, தேவைப்படும்போது கூப்பிடுங்கள்."
+    if lang == "hindi":
+        return "ठीक है, जब ज़रूरत हो तो बुला लीजिएगा।"
+    if lang == "urdu":
+        return "ٹھیک ہے، جب ضرورت ہو تو بلا لیجیے گا۔"
+    if lang == "roman_urdu":
+        return "Theek hai — jab zaroorat ho to bula lijiyega."
+    return "Alright — call me when you need me."

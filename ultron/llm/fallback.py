@@ -71,3 +71,33 @@ class FallbackClient(LLMClient):
                     raise       # non-retryable: surface immediately
         # All providers exhausted
         raise last_err if last_err else RuntimeError("All LLM providers failed.")
+
+    def chat_stream(self, system: str, history: list, tools: list[dict],
+                    on_token=None) -> AssistantResponse:
+        """Streaming with the same fallback chain as chat()."""
+        n = len(self.clients)
+        last_err: Exception | None = None
+        for offset in range(n):
+            idx = (self.active + offset) % n
+            client = self.clients[idx]
+            try:
+                resp = client.chat_stream(system, history, tools, on_token=on_token)
+                if idx != self.active:
+                    print(f"[llm] switched to fallback provider #{idx}")
+                    self.active = idx
+                return resp
+            except Exception as e:
+                last_err = e
+                if _is_retryable(e):
+                    continue
+                raise
+        raise last_err if last_err else RuntimeError("All LLM providers failed.")
+
+    def clone_with_model(self, model: str) -> "FallbackClient":
+        clones = []
+        for c in self.clients:
+            try:
+                clones.append(c.clone_with_model(model))
+            except Exception:
+                clones.append(c)
+        return FallbackClient(clones, max_retries_each=self.max_retries_each)

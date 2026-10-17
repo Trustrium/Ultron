@@ -107,6 +107,22 @@ def make_llm_client() -> LLMClient:
     return primary
 
 
+def make_fast_llm_client() -> LLMClient | None:
+    """Build a client on the opt-in fast model (LLM_FAST_MODEL) with the SAME
+    provider/key/base_url as the primary client. No fallback chain — the fast
+    path is speculative; Brain falls back to the main client on any miss.
+    Returns None when LLM_FAST_MODEL is empty or the client can't be built."""
+    from ..config import LLM_FAST_MODEL
+    if not LLM_FAST_MODEL:
+        return None
+    try:
+        provider = (LLM_PROVIDER or "groq").lower()
+        return _build_one(provider, LLM_API_KEY, LLM_FAST_MODEL, LLM_BASE_URL)
+    except Exception as e:
+        print(f"[llm] fast client unavailable ({e}); using main model only.")
+        return None
+
+
 def make_vision_client():
     """Build a vision-capable client. Defaults to the same provider/key as the brain."""
     provider = (VISION_PROVIDER or LLM_PROVIDER or "groq").lower()
