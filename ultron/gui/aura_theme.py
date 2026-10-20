@@ -55,6 +55,15 @@ AURA_COLORS = {
     "bubble_you": "#3A2E7A",
     "bubble_ultron": "#241F42",
     "bubble_system": "#1B1730",
+    # v4 pearl palette (orb theme + presentation accents; the desktop
+    # window itself stays dark glass — pearl is never a light theme).
+    "pearl_pink": "#E76AB8",
+    "pearl_pink_soft": "#F4B8DC",
+    "pearl_lavender": "#B79CED",
+    "pearl_cyan": "#70DDEB",
+    # v4 glass polish
+    "glass_card": "rgba(45, 36, 80, 0.55)",
+    "glass_card_border": "rgba(139, 92, 246, 0.35)",
 }
 
 AURA_GRADIENT = ("#7C3AED", "#8B5CF6", "#EC4899", "#FF6A00")
@@ -427,7 +436,75 @@ QScrollBar::handle:horizontal { background: #322B5C; border-radius: 4px; }
 QScrollBar::handle:horizontal:hover { background: #8B5CF6; }
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
 QStatusBar { color: #8E83B8; background-color: transparent; font-size: 10pt; }
+
+/* ---- v4 glass polish: translucent cards, softer edges ---- */
+QFrame#glassCard {
+    background-color: rgba(45, 36, 80, 0.55);
+    border: 1px solid rgba(139, 92, 246, 0.35);
+    border-radius: 16px;
+}
+QFrame#auraHeader {
+    background-color: rgba(36, 31, 66, 0.78);
+}
+QFrame#historyPanel, QFrame#centerPanel {
+    background-color: rgba(27, 23, 48, 0.82);
+}
+QFrame#inputBar {
+    background-color: rgba(22, 18, 42, 0.85);
+}
+QPushButton#auraChipBtn:checked, QPushButton#chipBtn:checked {
+    background-color: rgba(255, 106, 0, 0.18);
+    border-color: #FF6A00;
+    color: #FFFFFF;
+}
+QPushButton#miniHudBtn {
+    background-color: #241F42;
+    color: #E8E8E8;
+    border: 1px solid #322B5C;
+    border-radius: 12px;
+    padding: 8px 12px;
+    font-size: 10pt;
+    font-weight: 600;
+}
+QPushButton#miniHudBtn:hover { border-color: #8B5CF6; background-color: #2D2450; }
+QPushButton#miniHudBtn:checked {
+    background-color: rgba(255, 106, 0, 0.18);
+    border-color: #FF6A00;
+    color: #FFFFFF;
+}
+QMenuBar {
+    background-color: transparent;
+    color: #C4B8E8;
+    font-size: 10pt;
+}
+QMenuBar::item { padding: 4px 12px; border-radius: 8px; }
+QMenuBar::item:selected { background-color: #2D2450; color: #FFFFFF; }
 """
+
+
+def apply_soft_shadow(widget, blur: int = 24, y_offset: int = 6,
+                      alpha: int = 90) -> bool:
+    """Attach a soft drop shadow to a glass card (cheap, one widget).
+
+    Safe no-op (returns False) if Qt effects are unavailable or the
+    widget rejects the effect — callers never need to care. Use only
+    on a couple of large panels; per-widget effects on many small
+    controls are not cheap and are deliberately not done here.
+    """
+    try:
+        from PySide6.QtGui import QColor
+        from PySide6.QtWidgets import QGraphicsDropShadowEffect
+
+        effect = QGraphicsDropShadowEffect(widget)
+        effect.setBlurRadius(max(0, int(blur)))
+        effect.setOffset(0, int(y_offset))
+        color = QColor(0, 0, 0)
+        color.setAlpha(max(0, min(255, int(alpha))))
+        effect.setColor(color)
+        widget.setGraphicsEffect(effect)
+        return True
+    except Exception:
+        return False
 
 
 def get_aura_stylesheet() -> str:

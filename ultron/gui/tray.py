@@ -58,6 +58,44 @@ def install_tray(window, app: QApplication) -> QSystemTrayIcon | None:
     menu.addAction(settings_action)
 
     menu.addSeparator()
+
+    # Mini HUD: collapses the window to orb + status + Talk + Expand.
+    mini_action = QAction("Mini HUD", menu)
+    mini_action.setCheckable(True)
+
+    def _toggle_mini():
+        fn = getattr(window, "_toggle_mini_mode", None)
+        if callable(fn):
+            try:
+                fn()
+            except Exception:
+                pass
+        mini_action.setChecked(bool(getattr(window, "_mini_mode", False)))
+
+    mini_action.triggered.connect(_toggle_mini)
+    menu.addAction(mini_action)
+    # Let MainWindow keep this item's check state in sync when the
+    # mode is toggled from the header button / View menu instead.
+    window._tray_mini_action = mini_action
+
+    # Always on Top: checkable; MainWindow applies the window flag.
+    aot_action = QAction("Always on Top", menu)
+    aot_action.setCheckable(True)
+
+    def _toggle_aot(checked=False):
+        fn = getattr(window, "_set_always_on_top", None)
+        if callable(fn):
+            try:
+                fn(bool(checked))
+            except Exception:
+                pass
+        aot_action.setChecked(bool(getattr(window, "_always_on_top", False)))
+
+    aot_action.triggered.connect(_toggle_aot)
+    menu.addAction(aot_action)
+    window._tray_aot_action = aot_action
+
+    menu.addSeparator()
     quit_action = QAction("Quit Ultron", menu)
     def _quit():
         window._hide_on_close = False

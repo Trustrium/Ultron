@@ -23,6 +23,8 @@ from __future__ import annotations
 import datetime as _dt
 import html
 import inspect
+import os
+import sys
 import threading
 import traceback
 
@@ -154,6 +156,9 @@ class MainWindow(QMainWindow):
     # exposes an on_token callback; otherwise never fired).
     _text_stream_begin = Signal()
     _text_token = Signal(str)
+    # Toggle-hotkey requests (emitted from the keyboard library's
+    # thread; the slot runs on the GUI thread — thread-safe by Qt).
+    _toggle_requested = Signal()
 
     def __init__(self):
         super().__init__()
@@ -198,6 +203,22 @@ class MainWindow(QMainWindow):
         self._typing_timer = QTimer(self)
         self._typing_timer.setInterval(400)
         self._typing_timer.timeout.connect(self._tick_typing_dots)
+        # --- v4 desktop state -------------------------------------
+        # Reduced motion (ULTRON_REDUCED_MOTION=1): orb is static
+        # (handled in aura_orb) and the typing dots do not animate.
+        self._reduced_motion = os.environ.get(
+            "ULTRON_REDUCED_MOTION", ""
+        ).strip() == "1"
+        # Mini-HUD mode bookkeeping (see _set_mini_mode).
+        self._mini_mode = False
+        self._normal_geometry = None
+        self._normal_min_size = None
+        self._mini_saved_visibility: dict = {}
+        self._mini_hide_widgets: list = []
+        # Always-on-top flag state (see _set_always_on_top).
+        self._always_on_top = False
+        # Second global hotkey (window toggle); created further down.
+        self._toggle_hotkey = None
 
         central = QWidget()
         root = QVBoxLayout(central)
@@ -266,10 +287,31 @@ class MainWindow(QMainWindow):
                 break
         self.settings_btn = QPushButton("⚙  Settings")
         self.history_btn = QPushButton("📜  History")
+        # Mini-HUD toggle (v4): collapses to orb + status + Talk.
+        self.mini_btn = QPushButton("🗕  Mini HUD")
+        self.mini_btn.setObjectName("miniHudBtn")
+        self.mini_btn.setCheckable(True)
+        self.mini_btn.setToolTip("Mini HUD — compact orb-only mode (420×180)")
+        self.mini_btn.setAccessibleName("Toggle Mini HUD mode")
         header_layout.addWidget(self.mode_combo)
         header_layout.addWidget(self.settings_btn)
         header_layout.addWidget(self.history_btn)
+        header_layout.addWidget(self.mini_btn)
         root.addWidget(header)
+
+        # View menu: Mini HUD + Always on Top (mirrors the tray menu;
+        # the tray items and these actions keep each other in sync).
+        view_menu = self.menuBar().addMenu("View")
+        self._view_mini_action = view_menu.addAction("Mini HUD")
+        self._view_mini_action.setCheckable(True)
+        self._view_mini_action.triggered.connect(
+            lambda checked=False: self._set_mini_mode(bool(checked))
+        )
+        self._view_aot_action = view_menu.addAction("Always on Top")
+        self._view_aot_action.setCheckable(True)
+        self._view_aot_action.triggered.connect(
+            lambda checked=False: self._set_always_on_top(bool(checked))
+        )
 
         # ---- Body: History sidebar + center ---------------------------
         body = QHBoxLayout()
@@ -478,15 +520,33 @@ class MainWindow(QMainWindow):
         self.start_btn.setObjectName("startBtn")
         self.stop_btn = QPushButton("⏹  Stop")
         self.stop_btn.setEnabled(False)
+        # Expand button: only visible in Mini-HUD mode, restores the
+        # full window (the header Mini HUD button is hidden there).
+        self.expand_btn = QPushButton("⤢  Expand")
+        self.expand_btn.setObjectName("auraChipBtn")
+        self.expand_btn.setToolTip("Expand — back to the full Ultron window")
+        self.expand_btn.setAccessibleName("Expand to full window")
+        self.expand_btn.setVisible(False)
         controls.addWidget(self.talk_btn, 1)
         controls.addWidget(self.start_btn, 1)
         controls.addWidget(self.stop_btn, 1)
+        controls.addWidget(self.expand_btn, 1)
         center_layout.addLayout(controls)
 
         hint = QLabel("Tip: Chat → type + Send. Talk → Talk card or Talk now / Ctrl+Alt+J. Wake mode is still broken — use Voice / Chat.")
         hint.setStyleSheet("color: #8E83B8; font-size: 10px;")
         hint.setWordWrap(True)
         center_layout.addWidget(hint)
+
+        # Glass polish (v4): one soft shadow on each large panel —
+        # cheap and safe; a no-op if Qt effects are unavailable.
+        try:
+            from .aura_theme import apply_soft_shadow
+
+            apply_soft_shadow(header)
+            apply_soft_shadow(center)
+        except Exception:
+            pass
 
         self.setStatusBar(QStatusBar(self))
         self._refresh_status_bar()
@@ -515,13 +575,106 @@ class MainWindow(QMainWindow):
         if s.get("ptt_enabled", True):
             self._hotkey.start()
 
+        # Second global hotkey (v4): show / hide the window. Separate
+        # GlobalHotkey instance from PTT. Combo from env HOTKEY_TOGGLE
+        # (default ctrl+shift+u; alt+space is also supported — the
+        # keyboard library accepts both spellings). The callback runs
+        # on the keyboard thread, so it only emits a Qt signal; the
+        # actual show/hide happens on the GUI thread. Registration
+        # failure is logged only — the app still runs.
+        self._toggle_requested.connect(self._toggle_visibility)
+        _toggle_combo = (
+            os.environ.get("HOTKEY_TOGGLE") or "ctrl+shift+u"
+        ).strip().lower() or "ctrl+shift+u"
+        self._toggle_hotkey = GlobalHotkey(
+            _toggle_combo, lambda: self._toggle_requested.emit()
+        )
+        try:
+            if not self._toggle_hotkey.start():
+                self._append(
+                    "system",
+                    f"Toggle hotkey '{_toggle_combo}' could not be registered "
+                    "— use the tray icon or Mini HUD button instead.",
+                )
+        except Exception:
+            pass
+
         # Sync auto-start preference with the Windows registry (best-effort).
         try:
             autostart.sync_with(bool(s.get("auto_start_on_boot", False)))
         except Exception:
             pass
 
+        # Widgets hidden in Mini-HUD mode. Everything NOT in this
+        # list stays visible: header (brand + status pill), the orb,
+        # Talk now, and the Expand button. Visibility is saved on
+        # entering mini mode and restored exactly on exit, so
+        # transient widgets (typing label, banners, stream frame)
+        # never pop back on spuriously.
+        self._mini_hide_widgets = [
+            left,                    # history sidebar
+            eyebrow_label,
+            subtitle_label,
+            self.mode_combo,
+            self.settings_btn,
+            self.history_btn,
+            self.mini_btn,
+            self.listening_banner,
+            self.waveform,
+            self.agi_label,
+            *self._stage_pills.values(),
+            self.chat_card,
+            self.talk_card,
+            self.log_view,
+            self.typing_label,
+            self.skeleton_frame,
+            self.stream_frame,
+            chips_label,
+            *self.chip_buttons,
+            input_bar,
+            self.start_btn,
+            self.stop_btn,
+            hint,
+        ]
+
+        # Accessibility (v4): names / descriptions / tooltips on the
+        # icon-ish and primary controls (orb sets its own in aura_orb).
+        self.talk_btn.setToolTip("Talk now — one voice turn (or Ctrl+Alt+J)")
+        self.talk_btn.setAccessibleName("Talk now")
+        self.talk_btn.setAccessibleDescription(
+            "Start one voice turn: Ultron listens, thinks and replies aloud."
+        )
+        self.start_btn.setToolTip("Start Ultron in the selected mode")
+        self.start_btn.setAccessibleName("Start Ultron")
+        self.stop_btn.setToolTip("Stop the running voice session")
+        self.stop_btn.setAccessibleName("Stop Ultron")
+        self.settings_btn.setToolTip("Open Ultron settings")
+        self.settings_btn.setAccessibleName("Settings")
+        self.history_btn.setToolTip("Open the full conversation history")
+        self.history_btn.setAccessibleName("Conversation history")
+        self.mic_btn.setAccessibleName("Talk using the microphone")
+        self.send_btn.setAccessibleName("Send message")
+        self.send_btn.setToolTip("Send the typed message to Ultron")
+        self.mode_combo.setAccessibleName("Assistant mode")
+        self.mode_combo.setToolTip("Wake word or manual Voice mode")
+        self.input_edit.setAccessibleName("Message Ultron")
+        self.status_text.setAccessibleName("Ultron status")
+
+        # Speak-level poll (v4, defensive): if ultron.voice.speak ever
+        # grows a get_audio_level() hook, prefer it for the orb /
+        # waveform while speaking. It does not exist today, so this
+        # timer is a no-op and the worker's level_changed -> _on_level
+        # path remains the only level source. The module is only read
+        # from sys.modules (already imported by a speak call) — this
+        # never imports or blocks on the TTS stack.
+        self._speak_level_timer = QTimer(self)
+        self._speak_level_timer.setInterval(150)
+        self._speak_level_timer.timeout.connect(self._poll_speak_level)
+        self._speak_level_timer.start()
+
         # Wire
+        self.mini_btn.clicked.connect(self._toggle_mini_mode)
+        self.expand_btn.clicked.connect(self._toggle_mini_mode)
         self.start_btn.clicked.connect(self._start)
         self.stop_btn.clicked.connect(self._stop)
         self.settings_btn.clicked.connect(self._open_settings)
@@ -546,6 +699,159 @@ class MainWindow(QMainWindow):
                     break
             self._start()
             QTimer.singleShot(800, self.worker.request_voice_turn)
+
+    # --- v4 desktop: toggle hotkey / mini-HUD / always-on-top -------
+    def _toggle_visibility(self):
+        """Show the window if hidden/minimized, else hide it to tray.
+
+        Runs on the GUI thread (reached via the _toggle_requested
+        signal from the global toggle hotkey, HOTKEY_TOGGLE).
+        """
+        try:
+            if self.isHidden() or self.isMinimized():
+                if self.isMinimized():
+                    self.showNormal()
+                else:
+                    self.show()
+                self.raise_()
+                self.activateWindow()
+            else:
+                self.hide()
+        except Exception:
+            pass
+
+    def _toggle_mini_mode(self):
+        self._set_mini_mode(not self._mini_mode)
+
+    def _set_mini_mode(self, on: bool) -> None:
+        """Mini-HUD mode: 420x180, orb + status + Talk + Expand only.
+
+        Entering saves the normal geometry, the minimum size, the orb
+        size limits and every hidden widget's visibility; exiting
+        restores all of it exactly.
+        """
+        on = bool(on)
+        if on == self._mini_mode:
+            self._sync_mini_controls()
+            return
+        try:
+            if on:
+                self._normal_geometry = self.geometry()
+                self._normal_min_size = self.minimumSize()
+                self._mini_saved_visibility = {
+                    w: w.isVisible() for w in self._mini_hide_widgets
+                }
+                for w in self._mini_hide_widgets:
+                    w.setVisible(False)
+                self._mini_mode = True
+                # Shrink the orb so the compact layout fits.
+                self._orb_normal_min = self.aura_orb.minimumSize()
+                self._orb_normal_max = self.aura_orb.maximumSize()
+                self.aura_orb.setMinimumSize(72, 72)
+                self.aura_orb.setMaximumSize(120, 120)
+                self.expand_btn.setVisible(True)
+                try:
+                    self.statusBar().setVisible(False)
+                except Exception:
+                    pass
+                self.setMinimumSize(360, 150)
+                self.resize(420, 180)
+                self.setWindowTitle("Ultron — Mini HUD")
+            else:
+                self._mini_mode = False
+                for w, was_visible in self._mini_saved_visibility.items():
+                    w.setVisible(bool(was_visible))
+                self._mini_saved_visibility = {}
+                self.expand_btn.setVisible(False)
+                try:
+                    self.aura_orb.setMinimumSize(
+                        getattr(self, "_orb_normal_min", self.aura_orb.minimumSize())
+                    )
+                    self.aura_orb.setMaximumSize(
+                        getattr(self, "_orb_normal_max", self.aura_orb.maximumSize())
+                    )
+                except Exception:
+                    pass
+                try:
+                    self.statusBar().setVisible(True)
+                except Exception:
+                    pass
+                if self._normal_min_size is not None:
+                    self.setMinimumSize(self._normal_min_size)
+                if self._normal_geometry is not None:
+                    self.setGeometry(self._normal_geometry)
+                self.setWindowTitle("Ultron — Aura")
+        except Exception:
+            pass
+        self._sync_mini_controls()
+
+    def _sync_mini_controls(self) -> None:
+        """Keep header button / View action / tray item in agreement."""
+        for widget in (getattr(self, "mini_btn", None),):
+            try:
+                if widget is not None:
+                    widget.setChecked(self._mini_mode)
+            except Exception:
+                pass
+        for action in (
+            getattr(self, "_view_mini_action", None),
+            getattr(self, "_tray_mini_action", None),
+        ):
+            try:
+                if action is not None:
+                    action.setChecked(self._mini_mode)
+            except Exception:
+                pass
+
+    def _set_always_on_top(self, on: bool) -> None:
+        """Always-on-top: WindowStaysOnTopHint + show() again.
+
+        Changing a window flag hides the window on some platforms,
+        so a visible window is shown/raised again right after.
+        Default off. Tray + View menu check states stay in sync.
+        """
+        on = bool(on)
+        self._always_on_top = on
+        try:
+            was_visible = self.isVisible()
+            self.setWindowFlag(Qt.WindowStaysOnTopHint, on)
+            if was_visible:
+                self.show()
+                self.raise_()
+                self.activateWindow()
+        except Exception:
+            pass
+        for action in (
+            getattr(self, "_view_aot_action", None),
+            getattr(self, "_tray_aot_action", None),
+        ):
+            try:
+                if action is not None:
+                    action.setChecked(on)
+            except Exception:
+                pass
+
+    def _poll_speak_level(self) -> None:
+        """Prefer speak.get_audio_level() for the level display, if present.
+
+        The hook does not exist in ultron.voice.speak today — in that
+        case this is a silent no-op and the worker's level_changed
+        signal (mic RMS while listening) stays the level source via
+        _on_level. Only an already-imported speak module is consulted,
+        so this never triggers a TTS import on the GUI thread.
+        """
+        try:
+            module = sys.modules.get("ultron.voice.speak")
+            if module is None:
+                return
+            fn = getattr(module, "get_audio_level", None)
+            if not callable(fn):
+                return
+            level = fn()
+            if level is not None:
+                self._on_level(float(level))
+        except Exception:
+            pass
 
     def _open_history(self):
         dlg = ConversationViewer(self)
@@ -890,6 +1196,9 @@ class MainWindow(QMainWindow):
                 pass
 
     def _on_level(self, level: float):
+        # Level source: the worker's level_changed signal (mic RMS
+        # while listening). _poll_speak_level may also feed this slot
+        # if speak.get_audio_level() ever exists — see there.
         self.waveform.set_level(level)
         try:
             self.aura_orb.set_level(level)
@@ -932,6 +1241,10 @@ class MainWindow(QMainWindow):
         """Animate the typing indicator: . -> .. -> ... (400 ms)."""
         try:
             if not self.typing_label.isVisible():
+                return
+            if self._reduced_motion:
+                # Static label — no dot animation in reduced motion.
+                self.typing_label.setText("Ultron is thinking…")
                 return
             self._typing_dots = (self._typing_dots + 1) % 4
             self.typing_label.setText(
@@ -1034,5 +1347,16 @@ class MainWindow(QMainWindow):
             event.ignore()
             self.hide()
         else:
+            # Real close: stop both global hotkeys (PTT + toggle) so
+            # no keyboard hook outlives the window.
+            for _hk in (
+                getattr(self, "_hotkey", None),
+                getattr(self, "_toggle_hotkey", None),
+            ):
+                try:
+                    if _hk is not None and hasattr(_hk, "stop"):
+                        _hk.stop()
+                except Exception:
+                    pass
             self.worker.stop()
             super().closeEvent(event)

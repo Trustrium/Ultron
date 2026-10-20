@@ -130,6 +130,49 @@ LISTEN_SILENCE_SECONDS = _env_float("LISTEN_SILENCE_SECONDS", 0.5)
 LISTEN_MIN_SPEECH_SECONDS = _env_float("LISTEN_MIN_SPEECH_SECONDS", 0.5)
 LISTEN_CALIBRATE_SECONDS = _env_float("LISTEN_CALIBRATE_SECONDS", 0.8)
 
+# ===== v4: AI_MODEL alias, ElevenLabs TTS, desktop, brain, orb =====
+# AI_MODEL is an alias for LLM_MODEL (directive naming). It only takes effect
+# when explicitly set in .env; existing LLM_MODEL setups are unchanged.
+_ai_model_alias = os.getenv("AI_MODEL", "").strip()
+if _ai_model_alias:
+    LLM_MODEL = _ai_model_alias
+AI_MODEL = LLM_MODEL
+
+# TTS provider: edge (default, free) | elevenlabs (free tier available, needs key + voice id).
+TTS_PROVIDER = os.getenv("TTS_PROVIDER", "edge").strip().lower() or "edge"
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "").strip()
+DEFAULT_VOICE_ID = os.getenv("DEFAULT_VOICE_ID", "").strip()
+ELEVENLABS_VOICE_ID = (
+    os.getenv("ELEVENLABS_VOICE_ID", "").strip() or DEFAULT_VOICE_ID
+)
+ELEVENLABS_MODEL = os.getenv("ELEVENLABS_MODEL", "eleven_flash_v2_5").strip() or "eleven_flash_v2_5"
+
+# Desktop hotkeys: toggle show/hide (PTT stays ctrl+alt+j in the GUI).
+# HOTKEY_TOGGLE accepts any `keyboard`-library combo, e.g. ctrl+shift+u or alt+space.
+HOTKEY_TOGGLE = os.getenv("HOTKEY_TOGGLE", "ctrl+shift+u").strip().lower() or "ctrl+shift+u"
+
+# Brain memory hierarchy (ultron/memory/brain_manager.py).
+BRAIN_DIR = Path(os.getenv("BRAIN_DIR", "").strip() or (ROOT / "data" / "brain"))
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)).strip())
+        return value if value > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+BRAIN_REFLECT_EVERY_N = _env_int("BRAIN_REFLECT_EVERY_N", 10)
+
+# Orb / motion: ULTRON_ORB_THEME = aura (default) | pearl (pink/lavender/cyan).
+ULTRON_ORB_THEME = os.getenv("ULTRON_ORB_THEME", "aura").strip().lower()
+if ULTRON_ORB_THEME not in ("aura", "pearl"):
+    ULTRON_ORB_THEME = "aura"
+ULTRON_REDUCED_MOTION = os.getenv("ULTRON_REDUCED_MOTION", "").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+
 # Home Assistant (smart home) — optional
 HA_URL = os.getenv("HA_URL", "").strip()
 HA_TOKEN = os.getenv("HA_TOKEN", "").strip()

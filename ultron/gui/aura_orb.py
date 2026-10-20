@@ -17,6 +17,7 @@ Public API mirrors HudCoreWidget: set_state(str), set_level(0..1).
 from __future__ import annotations
 
 import math
+import os
 
 from PySide6.QtCore import Qt, QTimer, QPointF
 from PySide6.QtGui import (
@@ -51,6 +52,33 @@ _GRADIENT_STOPS = (
     (1.0, "#FF6A00"),   # orange edge
 )
 
+# Orb colour themes (v4). "aura" is the original v2/v3 purple -> pink ->
+# orange fluid gradient. "pearl" is the softer presentation palette:
+# lavender -> soft pink #E76AB8 -> pale pink -> cyan #70DDEB.
+# Selected with the `theme=` constructor argument, or the
+# ULTRON_ORB_THEME=pearl|aura environment variable. Anything unknown
+# falls back to "aura". The set_state / set_level API is unchanged.
+_ORB_THEMES = {
+    "aura": {
+        "stops": _GRADIENT_STOPS,
+        "blobs": ("#7C3AED", "#EC4899", "#FF6A00"),
+    },
+    "pearl": {
+        "stops": (
+            (0.0, "#B79CED"),   # lavender core
+            (0.35, "#E76AB8"),  # soft pink
+            (0.65, "#F4B8DC"),  # pale pink
+            (1.0, "#70DDEB"),   # cyan edge
+        ),
+        "blobs": ("#B79CED", "#E76AB8", "#70DDEB"),
+    },
+}
+
+
+def _reduced_motion() -> bool:
+    """ULTRON_REDUCED_MOTION=1 -> static gradient + state colour only."""
+    return os.environ.get("ULTRON_REDUCED_MOTION", "").strip() == "1"
+
 
 def _with_alpha(hex_color: str, alpha: int) -> QColor:
     c = QColor(hex_color)
@@ -61,7 +89,7 @@ def _with_alpha(hex_color: str, alpha: int) -> QColor:
 class AuraOrbWidget(QWidget):
     """Fluid gradient blob orb."""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, theme: str | None = None):
         super().__init__(parent)
         self.setMinimumSize(240, 240)
         self.setMaximumSize(420, 420)
@@ -70,12 +98,44 @@ class AuraOrbWidget(QWidget):
         self._target_level = 0.0
         self._phase = 0.0
         self._swirl = 0.0
+        # Theme: explicit arg wins, then ULTRON_ORB_THEME env, then aura.
+        if theme is None:
+            theme = os.environ.get("ULTRON_ORB_THEME", "aura")
+        self._theme_name = "aura"
+        self._stops = _ORB_THEMES["aura"]["stops"]
+        self._blob_colors = _ORB_THEMES["aura"]["blobs"]
+        self.set_theme(theme)
+        # Reduced motion: no animation timer at all — paintEvent draws
+        # one static frame (phase stays 0) in the current state colour,
+        # and set_state / set_level repaint on demand.
+        self._reduced_motion = _reduced_motion()
         self._timer = QTimer(self)
         self._timer.setInterval(16)  # ~60 fps — smooth micro-interactions
         self._timer.timeout.connect(self._tick)
-        self._timer.start()
+        if not self._reduced_motion:
+            self._timer.start()
+        # Accessibility: the orb is the primary status surface.
+        self.setAccessibleName("Ultron status orb")
+        self.setAccessibleDescription(
+            "Animated orb showing Ultron's current state: "
+            "idle, listening, thinking, speaking or error."
+        )
+        self.setToolTip("Ultron — state orb (colour follows listening / thinking / speaking)")
 
     # -- public API -------------------------------------------------
+    def set_theme(self, theme: str | None) -> None:
+        """Switch orb palette: 'aura' (default) or 'pearl'."""
+        name = (theme or "aura").strip().lower()
+        if name not in _ORB_THEMES:
+            name = "aura"
+        self._theme_name = name
+        self._stops = _ORB_THEMES[name]["stops"]
+        self._blob_colors = _ORB_THEMES[name]["blobs"]
+        self.update()
+
+    def theme(self) -> str:
+        return self._theme_name
+
     def set_state(self, state: str) -> None:
         state = (state or "idle").lower()
         if state not in _STATE:
@@ -93,6 +153,10 @@ class AuraOrbWidget(QWidget):
         except Exception:
             level = 0.0
         self._target_level = max(0.0, min(1.0, level))
+        if self._reduced_motion:
+            # No timer is running, so repaint the static frame now.
+            self._level = self._target_level
+            self.update()
 
     def sizeHint(self):  # noqa: N802 - Qt API
         from PySide6.QtCore import QSize
@@ -162,11 +226,12 @@ class AuraOrbWidget(QWidget):
         # Organic blobs: 3 offset gradient circles orbiting slowly.
         # Each blob is a radial gradient; overlapping them reads as one
         # flowing fluid shape.
-        for i, (frac, scale, hue) in enumerate((
-            (0.0, 0.92, "#7C3AED"),
-            (0.33, 0.78, "#EC4899"),
-            (0.66, 0.64, "#FF6A00"),
+        for i, (frac, scale) in enumerate((
+            (0.0, 0.92),
+            (0.33, 0.78),
+            (0.66, 0.64),
         )):
+            hue = self._blob_colors[i % len(self._blob_colors)]
             ang = math.radians(self._swirl + i * 120.0 + frac * 360.0)
             wob = 1.0 + 0.05 * math.sin(self._phase * 3.0 + i * 2.1)
             bx = cx + math.cos(ang) * radius * 0.14 * wob
@@ -185,7 +250,7 @@ class AuraOrbWidget(QWidget):
         # radius breathes; the overlapping blobs above give the organic feel.
         main_r = radius * 0.86 * breathe
         main = QRadialGradient(QPointF(cx, cy), main_r)
-        for stop, color in _GRADIENT_STOPS:
+        for stop, color in self._stops:
             main.setColorAt(stop, _with_alpha(color, 235))
         p.setBrush(QBrush(main))
         p.setPen(Qt.NoPen)

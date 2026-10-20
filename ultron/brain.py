@@ -128,7 +128,35 @@ class Brain:
         self.history: list = []
         self._fast_client: LLMClient | None = None
         self._fast_client_tried = False
+        # Section 1 Memory (v4): hierarchical BrainManager. Optional —
+        # any failure here must never stop the brain from working.
+        self.brain_manager = None
+        try:
+            from .memory.brain_manager import BrainManager
+            self.brain_manager = BrainManager()
+        except Exception as e:
+            print(f"[brain] BrainManager unavailable ({e})")
+            self.brain_manager = None
         _load_plugins_once()
+
+    def _record_brain_turn(self, user_text: str, reply_text: str, lang: str = "en") -> None:
+        """Persist a successful turn to BrainManager + reflect if due.
+
+        Best-effort only: failures are logged, never raised, and never
+        change the reply returned to the caller.
+        """
+        manager = getattr(self, "brain_manager", None)
+        if manager is None:
+            return
+        try:
+            manager.record_turn(user_text, reply_text, lang=lang)
+        except Exception as e:
+            print(f"[brain] BrainManager record_turn failed: {e}")
+            return
+        try:
+            manager.reflect_if_due(llm_client=self.client)
+        except Exception as e:
+            print(f"[brain] BrainManager reflect_if_due failed: {e}")
 
     def _get_fast_client(self) -> LLMClient | None:
         """Lazily build the opt-in fast-model client (same provider/key)."""
@@ -153,6 +181,19 @@ class Brain:
             profile=prof,
             personality=_personality_guidance(personality_id),
         )
+        # Section 1 Memory (v4): append BrainManager's long-term brain +
+        # user profile (already truncated to ~4000 chars by the manager)
+        # after the existing system prompt, keeping it fully intact.
+        addition = ""
+        manager = getattr(self, "brain_manager", None)
+        if manager is not None:
+            try:
+                addition = manager.system_prompt_addition() or ""
+            except Exception as e:
+                print(f"[brain] BrainManager prompt addition failed: {e}")
+                addition = ""
+        if addition:
+            base = base + "\n\n" + addition
         # Per-turn language directive: reply in the SAME language/script the
         # user just used. This is appended every turn (not baked into the
         # static prompt) because the language changes per turn. Never English
@@ -287,7 +328,9 @@ class Brain:
                             self.history.append(self.client.make_assistant_message(response))
                             if not response.tool_calls:
                                 self._trim_history()
-                                return _strip_tool_markup(response.text) or "Done."
+                                reply = _strip_tool_markup(response.text) or "Done."
+                                self._record_brain_turn(user_text, reply, lang)
+                                return reply
                             _status("doing")
                             results = self._exec_calls(response.tool_calls, lang)
                             tool_msg = self.client.make_tool_results(results)
@@ -308,7 +351,9 @@ class Brain:
                 if not response.tool_calls:
                     _status("replying")
                     self._trim_history()
-                    return _strip_tool_markup(response.text) or "Done."
+                    reply = _strip_tool_markup(response.text) or "Done."
+                    self._record_brain_turn(user_text, reply, lang)
+                    return reply
 
                 _status("doing")
                 results = self._exec_calls(response.tool_calls, lang)

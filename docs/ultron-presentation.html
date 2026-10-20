@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ultron AI Assistant — Presentation</title>
+<style>
+  :root{
+    --bg:#F7F5F7;
+    --bg-soft:#F1EFF3;
+    --ink:#2B2430;
+    --ink-soft:#6E6472;
+    --pink:#E76AB8;
+    --pink-soft:#F4B8DC;
+    --cyan:#70DDEB;
+    --lavender:#B79CED;
+    --card:#FFFFFF;
+    --line:#E7E0EA;
+    --graphite:#23202A;
+    --graphite-edge:#3A3547;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;}
+  html,body{height:100%;}
+  body{
+    font-family:"Inter","Segoe UI",system-ui,-apple-system,"Helvetica Neue",Arial,sans-serif;
+    background:linear-gradient(180deg,var(--bg) 0%,var(--bg-soft) 100%);
+    color:var(--ink);
+    -webkit-font-smoothing:antialiased;
+    overflow-x:hidden;
+  }
+
+  /* ---------- Header band ---------- */
+  .band{
+    background:linear-gradient(120deg,var(--pink-soft) 0%,#F7CFE9 55%,#D9F3F8 100%);
+    padding:56px 48px 120px;
+    position:relative;
+  }
+  .band::after{
+    content:"";
+    position:absolute;left:0;right:0;bottom:-1px;height:72px;
+    background:linear-gradient(180deg,rgba(247,245,247,0),var(--bg));
+  }
+  .headline{
+    font-size:15px;font-weight:800;letter-spacing:4px;color:var(--ink);
+    text-transform:uppercase;
+  }
+  .headline span{color:var(--pink);}
+  .subline{
+    margin-top:14px;max-width:520px;
+    font-size:15px;line-height:1.65;color:#57465E;font-weight:500;
+  }
+
+  /* ---------- Stage ---------- */
+  .stage{
+    max-width:1180px;margin:-84px auto 0;padding:0 32px 72px;
+    position:relative;z-index:2;
+  }
+  .phones{
+    display:flex;justify-content:center;align-items:flex-start;
+    gap:56px;flex-wrap:wrap;position:relative;
+  }
+
+  /* ---------- Feature labels ---------- */
+  .features{
+    display:grid;grid-template-columns:1fr 1fr;gap:20px 28px;
+    max-width:1180px;margin:8px auto 0;padding:0 32px 72px;
+  }
+  .feature{
+    background:var(--card);border:1px solid var(--line);border-radius:20px;
+    padding:24px 26px;
+    box-shadow:0 18px 40px rgba(183,156,237,.14);
+  }
+  .feature h3{
+    font-size:12px;font-weight:800;letter-spacing:2.5px;color:var(--ink);
+  }
+  .feature h3::before{
+    content:"";display:inline-block;width:8px;height:8px;border-radius:50%;
+    background:linear-gradient(135deg,var(--pink),var(--cyan));
+    margin-right:10px;vertical-align:1px;
+  }
+  .feature p{margin-top:9px;font-size:13.5px;line-height:1.65;color:var(--ink-soft);}
+
+  /* ---------- Phone mockups ---------- */
+  .phone{
+    width:300px;border-radius:46px;padding:11px;
+    background:linear-gradient(160deg,var(--graphite-edge),var(--graphite) 40%);
+    box-shadow:0 34px 70px rgba(43,36,48,.30),0 4px 14px rgba(43,36,48,.22);
+  }
+  .screen{
+    border-radius:36px;overflow:hidden;background:#FBF9FC;
+    min-height:600px;display:flex;flex-direction:column;position:relative;
+  }
+  .notch{
+    width:104px;height:22px;border-radius:0 0 14px 14px;
+    background:var(--graphite);margin:0 auto;flex:none;
+  }
+  .statusbar{
+    display:flex;justify-content:space-between;align-items:center;
+    padding:10px 22px 2px;font-size:11px;font-weight:700;color:var(--ink);
+  }
+  .statusbar .dots{letter-spacing:2px;color:var(--ink-soft);font-weight:600;}
+
+  /* Orb */
+  .orb-wrap{display:flex;justify-content:center;padding:26px 0 6px;}
+  .orb{
+    width:148px;height:148px;border-radius:50%;position:relative;flex:none;
+    background:
+      radial-gradient(circle at 32% 28%,rgba(255,255,255,.85),rgba(255,255,255,0) 42%),
+      radial-gradient(circle at 50% 50%,var(--lavender) 0%,var(--pink) 46%,var(--pink-soft) 72%,var(--cyan) 108%);
+    box-shadow:
+      0 18px 42px rgba(231,106,184,.45),
+      0 0 0 12px rgba(244,184,220,.28),
+      0 0 64px rgba(112,221,235,.35),
+      inset 0 -14px 28px rgba(183,156,237,.35);
+    animation:breathe 5.2s ease-in-out infinite;
+  }
+  .orb::after{
+    content:"";position:absolute;inset:16px;border-radius:50%;
+    background:radial-gradient(circle at 38% 32%,rgba(255,255,255,.55),rgba(255,255,255,0) 55%);
+  }
+  .orb.small{width:34px;height:34px;box-shadow:0 6px 14px rgba(231,106,184,.4),0 0 0 4px rgba(244,184,220,.25);}
+  @keyframes breathe{
+    0%,100%{transform:scale(1);}
+    50%{transform:scale(1.045);}
+  }
+
+  /* Phone 1 — home */
+  .brand{
+    text-align:center;font-size:11px;font-weight:800;letter-spacing:5px;color:var(--ink);
+    padding-top:6px;
+  }
+  .greeting{
+    text-align:center;padding:20px 30px 4px;
+    font-size:19px;line-height:1.5;font-weight:700;color:var(--ink);
+  }
+  .greeting em{font-style:normal;color:var(--pink);}
+  .home-body{padding:18px 20px 22px;display:flex;flex-direction:column;gap:14px;flex:1;}
+  .ask{
+    margin-top:auto;background:#fff;border:1px solid var(--line);border-radius:999px;
+    padding:14px 18px;font-size:13px;color:#A79CAD;
+    box-shadow:0 10px 24px rgba(183,156,237,.16);
+    display:flex;justify-content:space-between;align-items:center;
+  }
+  .ask .send{
+    width:28px;height:28px;border-radius:50%;flex:none;
+    background:linear-gradient(135deg,var(--pink),var(--pink-soft));
+    color:#fff;display:flex;align-items:center;justify-content:center;
+    font-size:13px;font-weight:800;
+  }
+  .chips{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;}
+  .chip{
+    font-size:11.5px;font-weight:700;color:#57465E;background:#fff;
+    border:1px solid var(--line);border-radius:999px;padding:8px 14px;
+  }
+  .chip.hot{
+    color:#fff;border-color:transparent;
+    background:linear-gradient(120deg,var(--pink),var(--pink-soft));
+  }
+
+  /* Phone 2 — chat */
+  .chat-head{
+    display:flex;align-items:center;gap:10px;padding:14px 18px 10px;
+    border-bottom:1px solid var(--line);
+  }
+  .chat-head .name{font-size:13.5px;font-weight:800;letter-spacing:1.5px;}
+  .chat-head .state{font-size:11px;color:var(--pink);font-weight:700;}
+  .chat{flex:1;padding:18px 16px;display:flex;flex-direction:column;gap:12px;}
+  .row{display:flex;gap:8px;align-items:flex-end;max-width:88%;}
+  .row.me{align-self:flex-end;flex-direction:row-reverse;}
+  .bubble{
+    padding:11px 14px;border-radius:20px;font-size:13px;line-height:1.55;
+  }
+  .row.me .bubble{
+    background:linear-gradient(135deg,var(--pink),#EF8CCB);
+    color:#fff;border-bottom-right-radius:6px;
+    box-shadow:0 10px 20px rgba(231,106,184,.30);
+  }
+  .row.ai .bubble{
+    background:#fff;color:var(--ink);border:1px solid var(--line);
+    border-bottom-left-radius:6px;
+    box-shadow:0 8px 18px rgba(183,156,237,.12);
+  }
+  .composer{
+    margin:0 14px 16px;background:#fff;border:1px solid var(--line);
+    border-radius:999px;padding:8px 8px 8px 18px;
+    display:flex;align-items:center;gap:10px;
+    box-shadow:0 12px 26px rgba(183,156,237,.16);
+  }
+  .composer .ph{flex:1;font-size:13px;color:#A79CAD;}
+  .composer .mic{
+    width:34px;height:34px;border-radius:50%;flex:none;
+    background:#FBF0F7;color:var(--pink);
+    display:flex;align-items:center;justify-content:center;font-size:15px;
+  }
+  .composer .go{
+    width:38px;height:38px;border-radius:50%;flex:none;color:#fff;
+    background:linear-gradient(135deg,var(--pink),var(--cyan));
+    display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:800;
+  }
+
+  footer{
+    text-align:center;padding:0 32px 44px;
+    font-size:11px;letter-spacing:2.5px;font-weight:700;color:#A79CAD;
+  }
+
+  /* ---------- Responsive ---------- */
+  @media (max-width:900px){
+    .band{padding:40px 26px 104px;}
+    .features{grid-template-columns:1fr;}
+    .phones{gap:36px;}
+  }
+  @media (max-width:380px){
+    .phone{width:272px;}
+    .screen{min-height:560px;}
+  }
+
+  /* ---------- Reduced motion ---------- */
+  @media (prefers-reduced-motion: reduce){
+    .orb{animation:none;}
+    *{transition:none !important;animation:none !important;}
+  }
+</style>
+</head>
+<body>
+
+  <header class="band">
+    <div class="headline">ULTRON AI ASSISTANT</div>
+    <p class="subline">
+      A personal assistant that listens, understands and gets things done —
+      calmly, quickly, and in your language. One companion across voice,
+      chat and the desktop.
+    </p>
+  </header>
+
+  <main class="stage">
+    <div class="phones">
+
+      <!-- Phone 1 : home -->
+      <div class="phone" role="img" aria-label="Ultron home screen on a phone">
+        <div class="screen">
+          <div class="notch"></div>
+          <div class="statusbar"><span>9:41</span><span class="dots">&#9679;&#9679;&#9679;</span></div>
+          <div class="brand">ULTRON</div>
+          <div class="orb-wrap"><div class="orb"></div></div>
+          <p class="greeting">AI Enables Smooth Assistant &amp; <em>Voice Interaction.</em></p>
+          <div class="home-body">
+            <div class="ask"><span>Ask Ultron anything...</span><span class="send">&#8593;</span></div>
+            <div class="chips">
+              <span class="chip hot">Voice</span>
+              <span class="chip">Chat</span>
+              <span class="chip">Generate</span>
+              <span class="chip">Search</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Phone 2 : chat -->
+      <div class="phone" role="img" aria-label="Ultron conversation screen on a phone">
+        <div class="screen">
+          <div class="notch"></div>
+          <div class="statusbar"><span>9:41</span><span class="dots">&#9679;&#9679;&#9679;</span></div>
+          <div class="chat-head">
+            <div class="orb small"></div>
+            <div>
+              <div class="name">ULTRON</div>
+              <div class="state">Listening&hellip;</div>
+            </div>
+          </div>
+          <div class="chat">
+            <div class="row me"><div class="bubble">Plan my morning, please — brief me on the day ahead.</div></div>
+            <div class="row ai"><div class="orb small"></div><div class="bubble">Done. Your briefing is ready: two meetings, one delivery on its way, and clear weather until noon.</div></div>
+            <div class="row me"><div class="bubble">Perfect. Remind me before the first call.</div></div>
+            <div class="row ai"><div class="orb small"></div><div class="bubble">Of course — I will remind you ten minutes early, in your language, by voice or text.</div></div>
+          </div>
+          <div class="composer">
+            <span class="ph">Ask Ultron anything...</span>
+            <span class="mic">&#127908;</span>
+            <span class="go">&#8593;</span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </main>
+
+  <section class="features">
+    <article class="feature">
+      <h3>SMART AI ASSISTANT</h3>
+      <p>Understands natural phrasing instead of fixed commands, remembers what matters to you, and turns a single sentence into a finished task.</p>
+    </article>
+    <article class="feature">
+      <h3>VOICE + CHAT EXPERIENCE</h3>
+      <p>Talk hands-free in a continuous, call-like conversation, or type when quiet is better — both paths share one memory and one gentle voice.</p>
+    </article>
+    <article class="feature">
+      <h3>INTELLIGENT AI CORE</h3>
+      <p>A planning core that reasons in steps — think, act, verify — and can connect to the model you prefer, from hosted services to your own endpoint.</p>
+    </article>
+    <article class="feature">
+      <h3>SMARTER CONVERSATIONS</h3>
+      <p>Replies in the language you spoke, keeps context across devices, and summarises long threads into the few lines you actually need.</p>
+    </article>
+  </section>
+
+  <footer>ULTRON &middot; BY TRUSTRIUM</footer>
+
+</body>
+</html>

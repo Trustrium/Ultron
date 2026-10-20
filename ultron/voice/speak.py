@@ -18,6 +18,8 @@ from .presets import ENGLISH_PRESETS, TAMIL_PRESETS, find_preset
 
 _mixer_state: dict = {"ok": False, "error": None, "warned": False}
 _speak_lock = threading.Lock()
+# For get_audio_level() Edge-path estimate: last time the mixer was seen busy.
+_audio_level_state: dict = {"value": 0.0, "last_busy_at": 0.0}
 
 
 def _ensure_mixer() -> bool:
@@ -149,6 +151,31 @@ def speak(text: str, lang: str = "en") -> None:
     if not text:
         return
 
+    # --- ElevenLabs routing (Section 2) -----------------------------------
+    # Only attempted when TTS_PROVIDER=elevenlabs AND key+voice are present.
+    # Any failure / False falls through to the Edge path below - never silent.
+    try:
+        if (os.getenv("TTS_PROVIDER", "") or "").strip().lower() == "elevenlabs":
+            _el_key = (os.getenv("ELEVENLABS_API_KEY", "") or "").strip()
+            _el_voice = (
+                (os.getenv("ELEVENLABS_VOICE_ID", "") or "").strip()
+                or (os.getenv("DEFAULT_VOICE_ID", "") or "").strip()
+            )
+            if _el_key and _el_voice:
+                from .elevenlabs_engine import speak_elevenlabs as _speak_el
+
+                if _speak_el(text, lang=lang):
+                    return
+                print("[speak] ElevenLabs failed, falling back to Edge TTS")
+            else:
+                print(
+                    "[speak] TTS_PROVIDER=elevenlabs but ELEVENLABS_API_KEY / "
+                    "voice id missing, falling back to Edge TTS"
+                )
+    except Exception as _el_err:
+        print(f"[speak] ElevenLabs routing error, falling back to Edge TTS: {_el_err}")
+    # --- end ElevenLabs routing -------------------------------------------
+
     preset = _preset_for(lang)
     sentences = _split_sentences(text)
 
@@ -189,6 +216,55 @@ def speak(text: str, lang: str = "en") -> None:
                     path.unlink(missing_ok=True)
                 except Exception:
                     pass
+
+
+def get_audio_level() -> float:
+    """Return an estimated audio level in 0.0..1.0 for UI metering (orb/HUD).
+
+    HONEST ESTIMATE ONLY: this is NOT a Web Audio FFT / real waveform
+    analysis - there is no sample-level metering available from pygame.
+    If ElevenLabs is the active provider (TTS_PROVIDER=elevenlabs with
+    key+voice present), this delegates to
+    elevenlabs_engine.get_current_level(). Otherwise it estimates from
+    the pygame mixer busy state: a fixed mid value (0.65) while busy,
+    decaying to 0.0 shortly after playback stops, and 0.0 when idle.
+    """
+    try:
+        if (os.getenv("TTS_PROVIDER", "") or "").strip().lower() == "elevenlabs":
+            _el_key = (os.getenv("ELEVENLABS_API_KEY", "") or "").strip()
+            _el_voice = (
+                (os.getenv("ELEVENLABS_VOICE_ID", "") or "").strip()
+                or (os.getenv("DEFAULT_VOICE_ID", "") or "").strip()
+            )
+            if _el_key and _el_voice:
+                from .elevenlabs_engine import get_current_level as _el_level
+
+                return float(_el_level())
+    except Exception as e:
+        print(f"[speak] get_audio_level ElevenLabs delegate failed: {e}")
+
+    try:
+        if _mixer_state.get("ok"):
+            busy = False
+            try:
+                busy = bool(pygame.mixer.music.get_busy())
+            except Exception:
+                busy = False
+            if busy:
+                _audio_level_state["value"] = 0.65
+                _audio_level_state["last_busy_at"] = time.time()
+                return 0.65
+            # Idle: decay the last busy value over ~0.5s, then 0.0.
+            last = float(_audio_level_state.get("last_busy_at") or 0.0)
+            val = float(_audio_level_state.get("value") or 0.0)
+            if last and val > 0:
+                elapsed = time.time() - last
+                if elapsed < 0.5:
+                    return round(max(0.0, val * (1.0 - elapsed / 0.5)), 3)
+                _audio_level_state["value"] = 0.0
+    except Exception as e:
+        print(f"[speak] get_audio_level failed: {e}")
+    return 0.0
 
 
 def preview_voice(preset: dict, sample_text: str = "") -> str | None:
